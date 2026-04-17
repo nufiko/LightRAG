@@ -1895,66 +1895,115 @@ async def pipeline_index_texts(
     await rag.apipeline_process_enqueue_documents()
 
 
+_SCAN_BATCH_SIZE = 50  # files enqueued before each apipeline_process_enqueue_documents call
+
+
 async def run_scanning_process(
     rag: LightRAG, doc_manager: DocumentManager, track_id: str = None
 ):
-    """Background task to scan and index documents
+    """Background task to scan and index documents.
 
-    Args:
-        rag: LightRAG instance
-        doc_manager: DocumentManager instance
-        track_id: Optional tracking ID to pass to all scanned files
+    Files are processed in batches of _SCAN_BATCH_SIZE so that:
+    - pipeline_status is updated regularly (WebUI stays responsive)
+    - the LLM starts extracting entities from early batches while later
+      batches are still being enqueued
     """
+    from lightrag.kg.shared_storage import get_namespace_data, get_namespace_lock
+
+    pipeline_status = await get_namespace_data("pipeline_status", workspace=rag.workspace)
+    pipeline_status_lock = get_namespace_lock("pipeline_status", workspace=rag.workspace)
+
+    async def _set_status(message: str, cur: int = 0, total: int = 0, busy: bool = True):
+        async with pipeline_status_lock:
+            pipeline_status["busy"] = busy
+            pipeline_status["latest_message"] = message
+            pipeline_status["history_messages"].append(message)
+            if total:
+                pipeline_status["batchs"] = total
+            if cur:
+                pipeline_status["cur_batch"] = cur
+
     try:
+        async with pipeline_status_lock:
+            pipeline_status.setdefault("history_messages", [])
+
         new_files = doc_manager.scan_directory_for_new_files()
         total_files = len(new_files)
         logger.info(f"Found {total_files} files to index.")
 
-        if new_files:
-            # Check for files with PROCESSED status and filter them out
-            valid_files = []
-            processed_files = []
-
-            for file_path in new_files:
-                try:
-                    file_label = str(file_path.relative_to(doc_manager.input_dir)).replace("\\", "/")
-                except ValueError:
-                    file_label = file_path.name
-                existing_doc_data = await rag.doc_status.get_doc_by_file_path(file_label)
-
-                if existing_doc_data and existing_doc_data.get("status") == "processed":
-                    # File is already PROCESSED, skip it with warning
-                    processed_files.append(file_label)
-                    logger.warning(f"Skipping already processed file: {file_label}")
-                else:
-                    # File is new or in non-PROCESSED status, add to processing list
-                    valid_files.append(file_path)
-
-            # Process valid files (new files + non-PROCESSED status files)
-            if valid_files:
-                await pipeline_index_files(rag, valid_files, track_id, input_dir=doc_manager.input_dir)
-                if processed_files:
-                    logger.info(
-                        f"Scanning process completed: {len(valid_files)} files Processed {len(processed_files)} skipped."
-                    )
-                else:
-                    logger.info(
-                        f"Scanning process completed: {len(valid_files)} files Processed."
-                    )
-            else:
-                logger.info(
-                    "No files to process after filtering already processed files."
-                )
-        else:
-            # No new files to index, check if there are any documents in the queue
-            logger.info(
-                "No upload file found, check if there are any documents in the queue..."
-            )
+        if not new_files:
+            logger.info("No new files found, checking queue for pending documents...")
             await rag.apipeline_process_enqueue_documents()
+            return
+
+        # --- Dedup phase ---
+        await _set_status(f"Checking {total_files} files for duplicates...", total=total_files)
+
+        valid_files = []
+        processed_files = []
+
+        for i, file_path in enumerate(new_files):
+            try:
+                file_label = str(file_path.relative_to(doc_manager.input_dir)).replace("\\", "/")
+            except ValueError:
+                file_label = file_path.name
+
+            existing_doc_data = await rag.doc_status.get_doc_by_file_path(file_label)
+            if existing_doc_data and existing_doc_data.get("status") == "processed":
+                processed_files.append(file_label)
+            else:
+                valid_files.append(file_path)
+
+            if (i + 1) % _SCAN_BATCH_SIZE == 0:
+                msg = f"Checked {i + 1}/{total_files} files — {len(valid_files)} to index, {len(processed_files)} already processed"
+                await _set_status(msg, cur=i + 1)
+                logger.info(msg)
+
+        if not valid_files:
+            await _set_status("Nothing to index — all files already processed.", busy=False)
+            logger.info("No files to process after filtering already processed files.")
+            return
+
+        # --- Batch-index phase ---
+        total_valid = len(valid_files)
+        total_batches = (total_valid + _SCAN_BATCH_SIZE - 1) // _SCAN_BATCH_SIZE
+        await _set_status(
+            f"Indexing {total_valid} files in {total_batches} batches ({len(processed_files)} skipped)...",
+            cur=0, total=total_valid,
+        )
+
+        sorted_files = sorted(valid_files, key=lambda p: get_pinyin_sort_key(str(p)))
+
+        for batch_num, batch_start in enumerate(range(0, total_valid, _SCAN_BATCH_SIZE), start=1):
+            batch = sorted_files[batch_start: batch_start + _SCAN_BATCH_SIZE]
+            batch_end = batch_start + len(batch)
+
+            msg = f"Enqueueing batch {batch_num}/{total_batches} ({batch_start + 1}–{batch_end} of {total_valid})"
+            await _set_status(msg, cur=batch_start)
+            logger.info(msg)
+
+            for file_path in batch:
+                await pipeline_enqueue_file(rag, file_path, track_id, input_dir=doc_manager.input_dir)
+
+            await rag.apipeline_process_enqueue_documents()
+            await _set_status(
+                f"Batch {batch_num}/{total_batches} complete ({batch_end}/{total_valid} files)",
+                cur=batch_end,
+            )
+
+        await _set_status(
+            f"Scan complete: {total_valid} files indexed, {len(processed_files)} skipped.",
+            cur=total_valid, busy=False,
+        )
+        logger.info(f"Scanning process completed: {total_valid} indexed, {len(processed_files)} skipped.")
 
     except Exception as e:
         logger.error(f"Error during scanning process: {str(e)}")
         logger.error(traceback.format_exc())
+        async with pipeline_status_lock:
+            pipeline_status["busy"] = False
+            pipeline_status["latest_message"] = f"Scan failed: {e}"
+            pipeline_status["history_messages"].append(f"Scan failed: {e}")
 
 
 async def background_delete_documents(
