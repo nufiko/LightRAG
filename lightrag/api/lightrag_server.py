@@ -359,6 +359,11 @@ def create_app(args):
 
             ASCIIColors.green("\nServer is ready to accept connections! 🚀\n")
 
+            # Resume any documents left in PENDING or PROCESSING state from a previous run
+            import asyncio
+
+            asyncio.ensure_future(rag.apipeline_process_enqueue_documents())
+
             yield
 
         finally:
