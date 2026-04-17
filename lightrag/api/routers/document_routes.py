@@ -1725,28 +1725,9 @@ async def pipeline_enqueue_file(
                     f"Successfully extracted and enqueued file: {file_path.name}"
                 )
 
-                # Move file to __enqueued__ directory after enqueuing
-                try:
-                    enqueued_dir = file_path.parent / "__enqueued__"
-                    await asyncio.to_thread(enqueued_dir.mkdir, exist_ok=True)
-
-                    # Generate unique filename to avoid conflicts
-                    unique_filename = get_unique_filename_in_enqueued(
-                        enqueued_dir, file_path.name
-                    )
-                    target_path = enqueued_dir / unique_filename
-
-                    # Move the file
-                    await asyncio.to_thread(file_path.rename, target_path)
-                    logger.debug(
-                        f"Moved file to enqueued directory: {file_path.name} -> {unique_filename}"
-                    )
-
-                except Exception as move_error:
-                    logger.error(
-                        f"Failed to move file {file_path.name} to __enqueued__ directory: {move_error}"
-                    )
-                    # Don't affect the main function's success status
+                # Skip moving files to __enqueued__ — the doc_status DB already
+                # tracks processed files, so moving them would corrupt git repos
+                # used as input directories.
 
                 return True, track_id
 
