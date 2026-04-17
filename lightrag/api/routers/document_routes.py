@@ -1326,7 +1326,10 @@ def _extract_xlsx(file_bytes: bytes) -> str:
 
 
 async def pipeline_enqueue_file(
-    rag: LightRAG, file_path: Path, track_id: str = None
+    rag: LightRAG,
+    file_path: Path,
+    track_id: str = None,
+    input_dir: Path | None = None,
 ) -> tuple[bool, str]:
     """Add a file to the queue for processing
 
@@ -1334,6 +1337,9 @@ async def pipeline_enqueue_file(
         rag: LightRAG instance
         file_path: Path to the saved file
         track_id: Optional tracking ID, if not provided will be generated
+        input_dir: Base input directory; when provided the stored file path is
+            relative to this directory (e.g. "src/Services/MyService.cs")
+            instead of just the bare filename.
     Returns:
         tuple: (success: bool, track_id: str)
     """
@@ -1341,6 +1347,14 @@ async def pipeline_enqueue_file(
     # Generate track_id if not provided
     if track_id is None:
         track_id = generate_track_id("unknown")
+
+    # Prefer a repo-relative label over the bare filename so that files with
+    # the same name in different directories (e.g. two Program.cs files) are
+    # distinguishable and their source location is preserved in the graph.
+    try:
+        file_label = str(file_path.relative_to(input_dir)).replace("\\", "/") if input_dir else file_path.name
+    except ValueError:
+        file_label = file_path.name
 
     try:
         content = ""
@@ -1704,7 +1718,7 @@ async def pipeline_enqueue_file(
 
             try:
                 await rag.apipeline_enqueue_documents(
-                    content, file_paths=file_path.name, track_id=track_id
+                    content, file_paths=file_label, track_id=track_id
                 )
 
                 logger.info(
@@ -1809,7 +1823,10 @@ async def pipeline_index_file(rag: LightRAG, file_path: Path, track_id: str = No
 
 
 async def pipeline_index_files(
-    rag: LightRAG, file_paths: List[Path], track_id: str = None
+    rag: LightRAG,
+    file_paths: List[Path],
+    track_id: str = None,
+    input_dir: Path | None = None,
 ):
     """Index multiple files sequentially to avoid high CPU load
 
@@ -1817,6 +1834,7 @@ async def pipeline_index_files(
         rag: LightRAG instance
         file_paths: Paths to the files to index
         track_id: Optional tracking ID to pass to all files
+        input_dir: Base input directory for computing relative file labels
     """
     if not file_paths:
         return
@@ -1830,7 +1848,7 @@ async def pipeline_index_files(
 
         # Process files sequentially with track_id
         for file_path in sorted_file_paths:
-            success, _ = await pipeline_enqueue_file(rag, file_path, track_id)
+            success, _ = await pipeline_enqueue_file(rag, file_path, track_id, input_dir=input_dir)
             if success:
                 enqueued = True
 
@@ -1898,20 +1916,23 @@ async def run_scanning_process(
             processed_files = []
 
             for file_path in new_files:
-                filename = file_path.name
-                existing_doc_data = await rag.doc_status.get_doc_by_file_path(filename)
+                try:
+                    file_label = str(file_path.relative_to(doc_manager.input_dir)).replace("\\", "/")
+                except ValueError:
+                    file_label = file_path.name
+                existing_doc_data = await rag.doc_status.get_doc_by_file_path(file_label)
 
                 if existing_doc_data and existing_doc_data.get("status") == "processed":
                     # File is already PROCESSED, skip it with warning
-                    processed_files.append(filename)
-                    logger.warning(f"Skipping already processed file: {filename}")
+                    processed_files.append(file_label)
+                    logger.warning(f"Skipping already processed file: {file_label}")
                 else:
                     # File is new or in non-PROCESSED status, add to processing list
                     valid_files.append(file_path)
 
             # Process valid files (new files + non-PROCESSED status files)
             if valid_files:
-                await pipeline_index_files(rag, valid_files, track_id)
+                await pipeline_index_files(rag, valid_files, track_id, input_dir=doc_manager.input_dir)
                 if processed_files:
                     logger.info(
                         f"Scanning process completed: {len(valid_files)} files Processed {len(processed_files)} skipped."
