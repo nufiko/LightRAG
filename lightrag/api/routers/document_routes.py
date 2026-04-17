@@ -1974,6 +1974,10 @@ async def run_scanning_process(
 
         sorted_files = sorted(valid_files, key=lambda p: get_pinyin_sort_key(str(p)))
 
+        # Enqueue all files in batches (for progress reporting only).
+        # apipeline_process_enqueue_documents is called ONCE after all files are
+        # enqueued — calling it per-batch causes concurrent-processing conflicts
+        # where only the first batch gets processed and the rest stay PENDING.
         for batch_num, batch_start in enumerate(range(0, total_valid, _SCAN_BATCH_SIZE), start=1):
             batch = sorted_files[batch_start: batch_start + _SCAN_BATCH_SIZE]
             batch_end = batch_start + len(batch)
@@ -1985,11 +1989,12 @@ async def run_scanning_process(
             for file_path in batch:
                 await pipeline_enqueue_file(rag, file_path, track_id, input_dir=doc_manager.input_dir)
 
-            await rag.apipeline_process_enqueue_documents()
-            await _set_status(
-                f"Batch {batch_num}/{total_batches} complete ({batch_end}/{total_valid} files)",
-                cur=batch_end,
-            )
+        await _set_status(
+            f"All {total_valid} files enqueued, starting LLM extraction...",
+            cur=total_valid,
+        )
+        logger.info(f"Enqueuing complete: {total_valid} files. Starting LLM extraction.")
+        await rag.apipeline_process_enqueue_documents()
 
         await _set_status(
             f"Scan complete: {total_valid} files indexed, {len(processed_files)} skipped.",
