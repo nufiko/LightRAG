@@ -35,6 +35,7 @@ from .config import (
 )
 from lightrag.utils import get_env_value
 from lightrag import LightRAG, __version__ as core_version
+from lightrag.chunking import chunking_by_file_type
 from lightrag.api import __api_version__
 from lightrag.types import GPTKeywordExtractionFormat
 from lightrag.utils import EmbeddingFunc
@@ -1090,6 +1091,7 @@ def create_app(args):
                 "entity_types": args.entity_types,
             },
             ollama_server_infos=ollama_server_infos,
+            chunking_func=chunking_by_file_type,
         )
     except Exception as e:
         logger.error(f"Failed to initialize LightRAG: {e}")
