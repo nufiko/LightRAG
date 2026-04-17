@@ -27,7 +27,16 @@ class NetworkXStorage(BaseGraphStorage):
     @staticmethod
     def load_nx_graph(file_name) -> nx.Graph:
         if os.path.exists(file_name):
-            return nx.read_graphml(file_name)
+            try:
+                return nx.read_graphml(file_name)
+            except Exception as e:
+                logger.warning(
+                    f"Failed to load graph from {file_name} (corrupt file?): {e}. "
+                    "Renaming to .bak and starting with empty graph."
+                )
+                bak_file = file_name + ".bak"
+                os.rename(file_name, bak_file)
+                logger.warning(f"Corrupted graph saved to {bak_file}")
         return None
 
     @staticmethod
@@ -35,7 +44,18 @@ class NetworkXStorage(BaseGraphStorage):
         logger.info(
             f"[{workspace}] Writing graph with {graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges"
         )
-        nx.write_graphml(graph, file_name)
+        tmp_file = file_name + ".tmp"
+        try:
+            nx.write_graphml(graph, tmp_file)
+            os.replace(tmp_file, file_name)
+        except Exception:
+            # Clean up partial tmp file so it doesn't confuse the next startup
+            if os.path.exists(tmp_file):
+                try:
+                    os.remove(tmp_file)
+                except OSError:
+                    pass
+            raise
 
     def __post_init__(self):
         working_dir = self.global_config["working_dir"]
@@ -54,6 +74,17 @@ class NetworkXStorage(BaseGraphStorage):
         self._storage_lock = None
         self.storage_updated = None
         self._graph = None
+
+        # Clean up any leftover .tmp file from an interrupted write (e.g. container killed mid-save)
+        tmp_file = self._graphml_xml_file + ".tmp"
+        if os.path.exists(tmp_file):
+            logger.warning(
+                f"[{self.workspace}] Found leftover tmp file {tmp_file} from an interrupted write. Removing it."
+            )
+            try:
+                os.remove(tmp_file)
+            except Exception as e:
+                logger.warning(f"[{self.workspace}] Could not remove tmp file {tmp_file}: {e}")
 
         # Load initial graph
         preloaded_graph = NetworkXStorage.load_nx_graph(self._graphml_xml_file)
