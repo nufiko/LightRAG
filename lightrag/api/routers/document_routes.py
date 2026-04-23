@@ -2010,6 +2010,7 @@ async def run_scanning_process(
         await _set_status(
             f"All {total_valid} files enqueued, starting LLM extraction...",
             cur=total_valid,
+            busy=False,  # Let apipeline_process_enqueue_documents own the busy flag
         )
         logger.info(f"Enqueuing complete: {total_valid} files. Starting LLM extraction.")
         await rag.apipeline_process_enqueue_documents()
