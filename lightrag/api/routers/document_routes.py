@@ -2022,6 +2022,34 @@ async def run_scanning_process(
         logger.info(f"Enqueuing complete: {total_valid} files. Starting LLM extraction.")
         await rag.apipeline_process_enqueue_documents()
 
+        # Orphan cleanup: drop docs whose file_path is no longer present on
+        # disk (or now excluded by gitignore / extension filters). Gated by
+        # rag.cleanup_orphans_on_scan so partial scans don't wipe real docs.
+        if rag.cleanup_orphans_on_scan:
+            # Build the authoritative "on disk and indexable right now" set in
+            # the same format doc_status stores: repo-relative, forward slashes.
+            current_file_paths: set[str] = set(processed_files)
+            for p in new_files:
+                try:
+                    current_file_paths.add(
+                        str(p.relative_to(doc_manager.input_dir)).replace("\\", "/")
+                    )
+                except ValueError:
+                    current_file_paths.add(p.name)
+
+            await _set_status(
+                "Cleaning up orphaned documents...", cur=total_valid, busy=True,
+            )
+            cleanup = await rag.apipeline_cleanup_orphans(current_file_paths)
+            cleanup_msg = (
+                f"Cleanup: {cleanup['orphans']} orphans found, "
+                f"{cleanup['deleted']} deleted, "
+                f"{cleanup['failed']} failed, "
+                f"{cleanup['codegraph_purged']} codegraph nodes purged"
+            )
+            logger.info(cleanup_msg)
+            await _set_status(cleanup_msg, cur=total_valid, busy=False)
+
         await _set_status(
             f"Scan complete: {total_valid} files indexed, {len(processed_files)} skipped.",
             cur=total_valid, busy=False,

@@ -529,6 +529,16 @@ class LightRAG:
     unaffected and still go through the LLM pipeline. Requires the `codegraph`
     extra: `pip install lightrag-hku[codegraph]`."""
 
+    cleanup_orphans_on_scan: bool = field(
+        default=os.getenv("CLEANUP_ORPHANS_ON_SCAN", "false").strip().lower()
+        in ("1", "true", "yes", "on")
+    )
+    """If True, run_scanning_process detects docs in doc_status whose file_path is
+    no longer present on disk (or now excluded by gitignore / extension filters)
+    and deletes them — chunks, entities, and codegraph symbols.  Disabled by
+    default because a partial scan would otherwise remove legitimate docs.
+    Only enable when the scan is trusted to walk the entire input_dir."""
+
     cosine_better_than_threshold: float = field(
         default=float(os.getenv("COSINE_THRESHOLD", 0.2))
     )
@@ -1746,6 +1756,94 @@ class LightRAG:
                 pipeline_status["history_messages"].append(reset_message)
 
         return to_process_docs
+
+    async def apipeline_cleanup_orphans(
+        self, current_file_paths: set[str]
+    ) -> dict[str, int]:
+        """Delete documents whose file_path is no longer in *current_file_paths*.
+
+        For every orphaned doc:
+          1. ``purge_file`` drops any codegraph symbol nodes the file produced
+             (no-op for files never ingested via codegraph — the manifest simply
+             won't have an entry).
+          2. ``adelete_by_doc_id`` removes chunks, LLM-extracted entities, and
+             the ``doc_status`` row.
+
+        The caller is responsible for ensuring *current_file_paths* is
+        authoritative (i.e. the scan walked the whole input_dir). Pass an
+        empty set intentionally to avoid a mass wipe — this method returns
+        early with zero counts when given an empty set.
+
+        Args:
+            current_file_paths: set of repo-relative file_paths known to be
+                on disk and indexable by current filter rules.
+
+        Returns:
+            Counts dict: ``{"orphans", "deleted", "failed", "codegraph_purged"}``.
+        """
+        if not current_file_paths:
+            logger.warning(
+                "cleanup_orphans: current_file_paths is empty; refusing to wipe. "
+                "Pass a non-empty set, or intentionally delete via adelete_by_doc_id."
+            )
+            return {"orphans": 0, "deleted": 0, "failed": 0, "codegraph_purged": 0}
+
+        # Import lazily so codegraph is not a hard dep.
+        from lightrag.codegraph.ingest import purge_file
+
+        all_statuses = [
+            DocStatus.PENDING,
+            DocStatus.PROCESSING,
+            DocStatus.EMBEDDED,
+            DocStatus.PREPROCESSED,
+            DocStatus.PROCESSED,
+            DocStatus.FAILED,
+        ]
+        all_docs = await self.doc_status.get_docs_by_statuses(all_statuses)
+
+        orphans: list[tuple[str, str]] = []
+        for doc_id, status in all_docs.items():
+            file_path = getattr(status, "file_path", None)
+            if file_path and file_path not in current_file_paths:
+                orphans.append((doc_id, file_path))
+
+        if not orphans:
+            logger.info("cleanup_orphans: no orphans found")
+            return {"orphans": 0, "deleted": 0, "failed": 0, "codegraph_purged": 0}
+
+        deleted = 0
+        failed = 0
+        codegraph_purged = 0
+
+        for doc_id, file_path in orphans:
+            try:
+                codegraph_purged += await purge_file(self, file_path)
+            except Exception as e:
+                logger.warning(
+                    f"cleanup_orphans: codegraph purge_file failed for {file_path}: {e}"
+                )
+            try:
+                await self.adelete_by_doc_id(doc_id)
+                deleted += 1
+                logger.info(
+                    f"cleanup_orphans: removed orphan {file_path} (doc_id={doc_id})"
+                )
+            except Exception as e:
+                failed += 1
+                logger.warning(
+                    f"cleanup_orphans: adelete_by_doc_id({doc_id}) failed for {file_path}: {e}"
+                )
+
+        logger.info(
+            f"cleanup_orphans: {len(orphans)} orphans, {deleted} deleted, "
+            f"{failed} failed, {codegraph_purged} codegraph nodes purged"
+        )
+        return {
+            "orphans": len(orphans),
+            "deleted": deleted,
+            "failed": failed,
+            "codegraph_purged": codegraph_purged,
+        }
 
     async def apipeline_process_enqueue_documents(
         self,
