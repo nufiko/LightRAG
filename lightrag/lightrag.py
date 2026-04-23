@@ -2031,8 +2031,14 @@ class LightRAG:
                             # the doc is never silently dropped.
                             code_graph_handled = False
                             if self.code_graph_enabled:
-                                from lightrag.codegraph import is_code_file
-                                from lightrag.codegraph.ingest import ingest_code_file
+                                # Import from the submodule directly so the
+                                # package __init__ doesn't have to re-export.
+                                # Keeps the import lazy so users without the
+                                # codegraph extra installed still start up.
+                                from lightrag.codegraph.ingest import (
+                                    ingest_code_file,
+                                    is_code_file,
+                                )
 
                                 if is_code_file(file_path):
                                     try:

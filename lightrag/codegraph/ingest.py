@@ -18,7 +18,7 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from lightrag.codegraph import get_extractor
+from lightrag.codegraph._registry import get_extractor
 from lightrag.codegraph._base import (
     NODE_CLASS,
     NODE_FILE,

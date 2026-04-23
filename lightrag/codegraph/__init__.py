@@ -18,20 +18,8 @@ from lightrag.codegraph._base import (
     edge_to_storage,
     node_to_storage,
 )
-from lightrag.codegraph import _csharp, _javascript, _python, _typescript
-
-_REGISTRY: dict[str, SymbolExtractor] = {}
-for _mod in (_csharp, _javascript, _python, _typescript):
-    for _ext in _mod.EXTENSIONS:
-        _REGISTRY[_ext] = _mod
-
-
-def get_extractor(file_path: str) -> SymbolExtractor | None:
-    """Return the registered extractor for *file_path*, or None."""
-    from pathlib import Path
-
-    ext = Path(file_path).suffix.lower()
-    return _REGISTRY.get(ext)
+from lightrag.codegraph._registry import get_extractor
+from lightrag.codegraph.ingest import ingest_code_file, is_code_file, purge_file
 
 
 __all__ = [
@@ -40,5 +28,8 @@ __all__ = [
     "SymbolExtractor",
     "edge_to_storage",
     "get_extractor",
+    "ingest_code_file",
+    "is_code_file",
     "node_to_storage",
+    "purge_file",
 ]
