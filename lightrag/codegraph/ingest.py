@@ -159,15 +159,27 @@ async def _upsert_entity_vectors(
     Only classes and functions are embedded (modules / files have no
     meaningful body). Content is ``qualified_name + "\\n" + body_text`` to
     give the embedder signal beyond just the name.
+
+    Large symbol bodies (generated DI code, giant switch statements, etc.)
+    can exceed the embedding model's context length (nomic-embed-text tops
+    out at 8192 tokens). We truncate per-symbol with a 10% cushion for
+    client/server tokenizer mismatches — the Ollama embed call's 400 is
+    hard-fail, so preferring signal loss over doc-level failure.
     """
     lines = source.splitlines()
     payload: dict[str, dict[str, Any]] = {}
+
+    token_limit = _safe_embedding_token_limit(rag)
+    truncated = 0
 
     for node in nodes:
         if node.entity_type not in _EMBEDDABLE_TYPES:
             continue
         body = "\n".join(lines[node.line_start - 1 : node.line_end])
         content = f"{node.qualified_name}\n{body}"
+        content, was_truncated = _truncate_for_embedding(rag, content, token_limit)
+        if was_truncated:
+            truncated += 1
         payload[compute_mdhash_id(node.node_id, prefix="ent-")] = {
             "content": content,
             "entity_name": node.node_id,
@@ -177,9 +189,44 @@ async def _upsert_entity_vectors(
             "file_path": node.file_path,
         }
 
+    if truncated:
+        logger.debug(
+            f"codegraph: truncated {truncated}/{len(payload)} symbol bodies "
+            f"to fit the {token_limit}-token embedding limit"
+        )
     if payload:
         await rag.entities_vdb.upsert(payload)
     return len(payload)
+
+
+def _safe_embedding_token_limit(rag: "LightRAG") -> int:
+    """Per-request token budget, with a cushion for tokenizer drift.
+
+    The local tiktoken tokenizer and the remote model's tokenizer count
+    tokens differently (often by 5-10%). Use a 90% cushion so a file that
+    tiktoken says fits doesn't surprise us at the server.
+    """
+    limit = getattr(rag, "embedding_token_limit", None)
+    if not limit:
+        # Fall back to a sensible default if the field isn't populated.
+        ef = getattr(rag, "embedding_func", None)
+        limit = getattr(ef, "max_token_size", None) or 8192
+    return max(256, int(limit * 0.9))
+
+
+def _truncate_for_embedding(
+    rag: "LightRAG",
+    content: str,
+    token_limit: int,
+) -> tuple[str, bool]:
+    """Return (content, was_truncated). Cheap char prefilter, then tokenize only if needed."""
+    # Even a 4-char-per-token worst case won't exceed the limit below this cutoff.
+    if len(content) < token_limit * 2:
+        return content, False
+    tokens = rag.tokenizer.encode(content)
+    if len(tokens) <= token_limit:
+        return content, False
+    return rag.tokenizer.decode(tokens[:token_limit]), True
 
 
 def _load_manifest(path: Path) -> dict[str, list[str]]:

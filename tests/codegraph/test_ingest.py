@@ -57,11 +57,31 @@ class _FakeVDB:
             self.rows.pop(i, None)
 
 
+class _CharTokenizer:
+    """Trivial tokenizer for tests: 4 chars per "token". Keeps tests fast and
+    deterministic without pulling in tiktoken."""
+
+    def encode(self, text: str) -> list[int]:
+        return [ord(c) for c in text]
+
+    def decode(self, tokens) -> str:
+        return "".join(chr(t) for t in tokens)
+
+
 class _FakeRAG:
-    def __init__(self, working_dir: str) -> None:
+    def __init__(
+        self,
+        working_dir: str,
+        embedding_token_limit: int | None = None,
+    ) -> None:
         self.working_dir = working_dir
         self.chunk_entity_relation_graph = _FakeGraph()
         self.entities_vdb = _FakeVDB()
+        # Attrs the ingestion layer reads for truncation. Only populated when
+        # a test needs to exercise the truncation path.
+        if embedding_token_limit is not None:
+            self.embedding_token_limit = embedding_token_limit
+            self.tokenizer = _CharTokenizer()
 
 
 @pytest.fixture
@@ -159,6 +179,40 @@ async def test_manifest_persisted(rag):
     )
     assert path in manifest
     assert "py:tests.codegraph.fixtures.sample" in manifest[path]
+
+
+async def test_oversized_symbol_body_is_truncated_before_embedding(tmp_path):
+    """Regression: nomic-embed-text errors with status 400 when input exceeds
+    context. Symbol bodies larger than the embedding model's token budget
+    must be client-side truncated so ingest doesn't fail on files like giant
+    DI registration classes."""
+    # Small token limit so a modest fixture triggers truncation. With the
+    # char-per-token tokenizer stub, 300 "tokens" = 300 chars.
+    rag = _FakeRAG(str(tmp_path), embedding_token_limit=300)
+
+    # One big function body (much bigger than the limit).
+    big_body = "    x = 1\n" * 500  # ~5000 chars
+    source = f"def giant():\n{big_body}\n"
+    path = "fixtures/giant.py"
+    counts = await ingest_code_file(rag, path, source)
+    assert counts["embedded"] == 1
+
+    # Only the function row should be in vdb; its content must be <= the
+    # truncation budget (300 * 0.9 cushion = 270 chars ish).
+    [row] = list(rag.entities_vdb.rows.values())
+    assert len(row["content"]) <= 300
+    # Truncation kept the prefix (qualified_name + start of body).
+    assert row["content"].startswith("fixtures.giant.giant\n")
+
+
+async def test_small_symbol_body_is_not_touched_by_truncation(tmp_path):
+    """Counterpart: symbols that comfortably fit should pass through unchanged."""
+    rag = _FakeRAG(str(tmp_path), embedding_token_limit=100_000)
+    source = "def small():\n    return 1\n"
+    await ingest_code_file(rag, "fixtures/small.py", source)
+    [row] = list(rag.entities_vdb.rows.values())
+    # No truncation — full body preserved.
+    assert "return 1" in row["content"]
 
 
 async def test_purge_file_drops_everything(rag):
