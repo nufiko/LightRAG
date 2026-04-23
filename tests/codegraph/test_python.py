@@ -144,6 +144,8 @@ def test_storage_adapter_shapes():
     assert data["entity_type"] == NODE_FUNCTION
     assert data["source_id"] == "x.py:3-5"
     assert data["line_start"] == "3"
+    # Neo4j backend requires entity_id in node properties; regression guard.
+    assert data["entity_id"] == "py:x.y"
 
     e = CodeEdge(
         source_id="py:x.y", target_id="py:x.z",

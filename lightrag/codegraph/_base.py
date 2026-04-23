@@ -86,10 +86,18 @@ class SymbolExtractor(Protocol):
 
 
 def node_to_storage(node: CodeNode) -> tuple[str, dict[str, str]]:
-    """Convert a CodeNode to the (node_id, node_data) pair BaseGraphStorage expects."""
+    """Convert a CodeNode to the (node_id, node_data) pair BaseGraphStorage expects.
+
+    Note: ``entity_id`` must be present inside node_data — the Neo4j backend
+    enforces it (properties must contain 'entity_id') and the LLM extraction
+    path also sets it (see operate.py: ``"entity_id": node_id``). NetworkX
+    doesn't enforce it, which is why early smoke tests on the fake/NetworkX
+    backends didn't catch this.
+    """
     return (
         node.node_id,
         {
+            "entity_id": node.node_id,
             "entity_type": node.entity_type,
             "entity_name": node.name,
             "qualified_name": node.qualified_name,
