@@ -18,10 +18,10 @@ from lightrag.codegraph._base import (
     edge_to_storage,
     node_to_storage,
 )
-from lightrag.codegraph import _python
+from lightrag.codegraph import _python, _typescript
 
 _REGISTRY: dict[str, SymbolExtractor] = {}
-for _mod in (_python,):
+for _mod in (_python, _typescript):
     for _ext in _mod.EXTENSIONS:
         _REGISTRY[_ext] = _mod
 
