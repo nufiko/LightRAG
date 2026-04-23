@@ -153,6 +153,12 @@ observability = [
     "langfuse>=3.8.1",
 ]
 
+# Code-aware graph extraction (tree-sitter based, no LLM for code)
+codegraph = [
+    "tree-sitter>=0.23.0,<1.0.0",
+    "tree-sitter-python>=0.23.0,<1.0.0",
+]
+
 [project.scripts]
 lightrag-server = "lightrag.api.lightrag_server:main"
 lightrag-gunicorn = "lightrag.api.run_with_gunicorn:main"
