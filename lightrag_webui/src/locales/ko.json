@@ -141,6 +141,7 @@
         "completed": "완료",
         "preprocessed": "전처리 완료",
         "processing": "처리 중",
+        "embedded": "임베딩됨",
         "pending": "대기 중",
         "failed": "실패"
       },

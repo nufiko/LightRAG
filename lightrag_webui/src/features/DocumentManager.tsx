@@ -50,6 +50,7 @@ const getCountValue = (counts: Record<string, number>, ...keys: string[]): numbe
 
 const hasActiveDocumentsStatus = (counts: Record<string, number>): boolean =>
   getCountValue(counts, 'PROCESSING', 'processing') > 0 ||
+  getCountValue(counts, 'EMBEDDED', 'embedded') > 0 ||
   getCountValue(counts, 'PENDING', 'pending') > 0 ||
   getCountValue(counts, 'PREPROCESSED', 'preprocessed') > 0
 
@@ -277,6 +278,7 @@ export default function DocumentManager() {
     processed: 1,
     preprocessed: 1,
     processing: 1,
+    embedded: 1,
     pending: 1,
     failed: 1,
   });
@@ -496,6 +498,7 @@ export default function DocumentManager() {
     documentCounts.preprocessed ||
     0;
   const processingCount = getCountValue(statusCounts, 'PROCESSING', 'processing') || documentCounts.processing || 0;
+  const embeddedCount = getCountValue(statusCounts, 'EMBEDDED', 'embedded') || documentCounts.embedded || 0;
   const pendingCount = getCountValue(statusCounts, 'PENDING', 'pending') || documentCounts.pending || 0;
   const failedCount = getCountValue(statusCounts, 'FAILED', 'failed') || documentCounts.failed || 0;
 
@@ -504,6 +507,7 @@ export default function DocumentManager() {
     processed: 0,
     preprocessed: 0,
     processing: 0,
+    embedded: 0,
     pending: 0,
     failed: 0
   })
@@ -1309,6 +1313,18 @@ export default function DocumentManager() {
                   </Button>
                   <Button
                     size="sm"
+                    variant={statusFilter === 'embedded' ? 'secondary' : 'outline'}
+                    onClick={() => handleStatusFilterChange('embedded')}
+                    disabled={isRefreshing}
+                    className={cn(
+                      embeddedCount > 0 ? 'text-cyan-600' : 'text-gray-500',
+                      statusFilter === 'embedded' && 'bg-cyan-100 dark:bg-cyan-900/30 font-medium border border-cyan-400 dark:border-cyan-600 shadow-sm'
+                    )}
+                  >
+                    {t('documentPanel.documentManager.status.embedded')} ({embeddedCount})
+                  </Button>
+                  <Button
+                    size="sm"
                     variant={statusFilter === 'pending' ? 'secondary' : 'outline'}
                     onClick={() => handleStatusFilterChange('pending')}
                     disabled={isRefreshing}
@@ -1480,6 +1496,9 @@ export default function DocumentManager() {
                               )}
                               {doc.status === 'processing' && (
                                 <span className="text-blue-600">{t('documentPanel.documentManager.status.processing')}</span>
+                              )}
+                              {doc.status === 'embedded' && (
+                                <span className="text-cyan-600">{t('documentPanel.documentManager.status.embedded')}</span>
                               )}
                               {doc.status === 'pending' && (
                                 <span className="text-yellow-600">{t('documentPanel.documentManager.status.pending')}</span>

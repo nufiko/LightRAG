@@ -1,7 +1,7 @@
 import { afterEach, beforeAll, describe, expect, test } from 'bun:test'
 
 type DocumentsRequest = {
-  status_filter?: 'pending' | 'processing' | 'preprocessed' | 'processed' | 'failed' | null
+  status_filter?: 'pending' | 'processing' | 'embedded' | 'preprocessed' | 'processed' | 'failed' | null
   page: number
   page_size: number
   sort_field: 'created_at' | 'updated_at' | 'id' | 'file_path'

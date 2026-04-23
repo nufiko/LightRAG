@@ -141,6 +141,7 @@
         "completed": "Abgeschlossen",
         "preprocessed": "Vorverarbeitet",
         "processing": "Verarbeitung",
+        "embedded": "Eingebettet",
         "pending": "Ausstehend",
         "failed": "Fehlgeschlagen"
       },

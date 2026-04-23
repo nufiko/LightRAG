@@ -183,7 +183,7 @@ export type DeleteDocResponse = {
   doc_id: string
 }
 
-export type DocStatus = 'pending' | 'processing' | 'preprocessed' | 'processed' | 'failed'
+export type DocStatus = 'pending' | 'processing' | 'embedded' | 'preprocessed' | 'processed' | 'failed'
 
 export type DocStatusResponse = {
   id: string

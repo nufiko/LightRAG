@@ -141,6 +141,7 @@
         "completed": "Completed",
         "preprocessed": "Preprocessed",
         "processing": "Processing",
+        "embedded": "Embedded",
         "pending": "Pending",
         "failed": "Failed"
       },

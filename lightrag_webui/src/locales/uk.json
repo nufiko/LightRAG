@@ -141,6 +141,7 @@
         "completed": "Завершено",
         "preprocessed": "Попередньо оброблено",
         "processing": "Обробка",
+        "embedded": "Вбудовано",
         "pending": "Очікування",
         "failed": "Невдало"
       },

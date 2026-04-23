@@ -141,6 +141,7 @@
         "completed": "完了",
         "preprocessed": "前処理済み",
         "processing": "処理中",
+        "embedded": "埋め込み済み",
         "pending": "保留中",
         "failed": "失敗"
       },

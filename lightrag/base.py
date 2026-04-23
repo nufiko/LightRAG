@@ -754,6 +754,7 @@ class DocStatus(str, Enum):
 
     PENDING = "pending"
     PROCESSING = "processing"
+    EMBEDDED = "embedded"
     PREPROCESSED = "preprocessed"
     PROCESSED = "processed"
     FAILED = "failed"

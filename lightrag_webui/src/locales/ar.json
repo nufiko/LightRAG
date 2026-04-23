@@ -141,6 +141,7 @@
         "completed": "مكتمل",
         "preprocessed": "مُعالج مسبقًا",
         "processing": "قيد المعالجة",
+        "embedded": "مُضمَّن",
         "pending": "معلق",
         "failed": "فشل"
       },

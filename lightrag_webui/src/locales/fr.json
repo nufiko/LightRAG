@@ -141,6 +141,7 @@
         "completed": "Terminé",
         "preprocessed": "Prétraité",
         "processing": "En traitement",
+        "embedded": "Intégré",
         "pending": "En attente",
         "failed": "Échoué"
       },

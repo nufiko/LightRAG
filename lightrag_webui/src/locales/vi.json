@@ -141,6 +141,7 @@
         "completed": "Hoàn thành",
         "preprocessed": "Đã tiền xử lý",
         "processing": "Đang xử lý",
+        "embedded": "Đã nhúng",
         "pending": "Đang chờ",
         "failed": "Thất bại"
       },
