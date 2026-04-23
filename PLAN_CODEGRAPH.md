@@ -1,5 +1,50 @@
 # Plan: Code-Graph Integration (LightRAG + Graphify ideas)
 
+## Status — 2026-04-23
+
+> **~70% of v1 scope shipped.** Four language extractors, live pipeline
+> wiring behind a flag, stale-symbol purge, 42 green unit tests. Live
+> smoke against real storage still outstanding.
+
+### Completed
+
+| Phase | Item | Commit(s) |
+|---|---|---|
+| 1 | `lightrag/codegraph/` package: `CodeNode` / `CodeEdge` / `SymbolExtractor` protocol / storage adapter | `9b56387c` |
+| 1 | **Python** extractor (`.py`) | `9b56387c` |
+| 1+ | **TypeScript** extractor (`.ts`, `.tsx`) with `_dispatch` refactor | `f1cc6743` |
+| 1+ | **C#** extractor (`.cs`), namespace-aware (block + file-scoped) | `bcdac318` |
+| 1+ | **JavaScript** extractor (`.js`, `.jsx`, `.mjs`, `.cjs`) + CommonJS `require()` → imports | `ec8e215b` |
+| 2a | `ingest_code_file()` + stale-symbol purge via `codegraph_manifest.json` + `purge_file()` | `52a64682` |
+| 2b | Wired into `embed_document()` behind `CODE_GRAPH_ENABLED`; code files skip LLM extraction and go straight to `PROCESSED`. Fallback to LLM path on any failure. | `c15794c5` |
+| 6 | Smoke tests (extractor-only, not live): 83 Python files @ 306/s; 92 TS files @ 742/s. 0 failures. | — |
+
+**Unit-test total: 42 passing** (8 Python / 10 TS / 8 C# / 10 JS / 6 ingest).
+
+### Remaining, in value order
+
+| # | Item | Plan section | Effort |
+|---|---|---|---|
+| 1 | **Live end-to-end smoke** against real PG/Neo4j or NetworkX+nano-vectordb storage — confirms Phase 2b hook writes the right shape to actual backends, not just the in-memory fakes the unit tests use | Phase 6 | ~1 hr |
+| 2 | **Java extractor** (`.java`) — biggest lift for Minas-team-ai's `coupons-core` services | Phase 1+ | ~30 min |
+| 3 | **Cross-file resolution pass** — walk graph, rewrite `py:foo` → `py:pkg.mod.foo` / `ts:./utils` → `ts:src.utils`; drop `unresolved:true` marker. Makes "who calls X" queries actually navigable | Phase 2 polish | ~2 hr |
+| 4 | **Claude Code plugin** (`plugin/` + `.claude-plugin/plugin.json` + `.mcp.json` + skills + hooks + marketplace JSON) | Phase 5 | ~1 day |
+| 5 | **Workspace-level re-index orchestrator** — walk `INPUT_DIR`, compute content-hash diff vs manifest, call `ingest_code_file` / `purge_file` for add/modify/delete. Turns the per-file helper into a "re-index repo" command | Change-detection section | ~2 hr |
+| 6 | **Git hooks skill** (`/lightrag:install-git-hooks`) + `PostToolUse` hook in plugin — auto re-index on pull, branch switch, Claude edits | Phase 5 extra | ~1 hr (after #4) |
+| 7 | **Phase 3 — per-symbol LLM descriptions** (cheap, optional) | Phase 3 | ~2 hr |
+| 8 | **Go extractor** | Phase 1+ | ~30 min |
+| 9 | Phase 0 rebase onto `HKUDS/main` | — | unknown, deferrable |
+| 10 | Benchmarks vs graphify / prose LightRAG | Phase 6 | ~1 hr |
+
+### Deviations from original plan
+
+- **Phase 0 rebase was skipped.** Working tree was dirty with user WIP; committing 7 WIP commits and then the codegraph work was preferred over rebasing onto a moving upstream target. Can revisit later.
+- **Languages over-delivered.** Phase 1 listed Python as the pilot; shipped TS / C# / JS as well.
+- **Phase 2 split into 2a/2b.** Standalone `ingest_code_file()` helper (2a) landed before the pipeline hook (2b) so the logic could be unit-tested against a fake LightRAG without touching `lightrag.py` while user WIP was pending.
+- **Cross-file resolution deferred.** Unresolved edges are flagged `extra={"unresolved": "true"}` so the resolution pass can find them later; they're not blocking v1.
+
+---
+
 ## Wins at a glance
 
 | # | Win | Why it matters |
