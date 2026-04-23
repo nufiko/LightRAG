@@ -1769,7 +1769,12 @@ class LightRAG:
                 to_process_docs: dict[
                     str, DocProcessingStatus
                 ] = await self.doc_status.get_docs_by_statuses(
-                    [DocStatus.PROCESSING, DocStatus.FAILED, DocStatus.PENDING]
+                    [
+                        DocStatus.PROCESSING,
+                        DocStatus.FAILED,
+                        DocStatus.PENDING,
+                        DocStatus.EMBEDDED,
+                    ]
                 )
 
                 if not to_process_docs:
@@ -1865,46 +1870,53 @@ class LightRAG:
                 job_name = f"{path_prefix}[{total_files} files]"
                 pipeline_status["job_name"] = job_name
 
-                # Create a counter to track the number of processed files
-                processed_count = 0
-                # Create a semaphore to limit the number of concurrent file processing
-                semaphore = asyncio.Semaphore(self.max_parallel_insert)
+                # Two-stage producer-consumer pipeline:
+                # Stage 1 (embedding): chunk + embed all docs concurrently, mark EMBEDDED
+                # Stage 2 (extraction): LLM entity extraction starts as soon as a doc is embedded
+                # This decouples fast embedding from slow LLM extraction for higher throughput.
+                embed_count = 0
+                extract_count = 0
+                embed_semaphore = asyncio.Semaphore(self.max_parallel_insert)
+                embedded_queue: asyncio.Queue = asyncio.Queue()
 
-                async def process_document(
+                # Separate docs: those already embedded (restart recovery) vs needing embedding
+                # PROCESSING with chunks_list means extraction was interrupted — skip re-embedding
+                docs_already_embedded = {
+                    k: v
+                    for k, v in to_process_docs.items()
+                    if v.status in (DocStatus.EMBEDDED, DocStatus.PROCESSING)
+                    and v.chunks_list
+                }
+                docs_to_embed = {
+                    k: v
+                    for k, v in to_process_docs.items()
+                    if k not in docs_already_embedded
+                }
+
+                # Pre-fill queue with docs already embedded from a previous run
+                for doc_id in docs_already_embedded:
+                    await embedded_queue.put(doc_id)
+
+                async def embed_document(
                     doc_id: str,
                     status_doc: DocProcessingStatus,
-                    split_by_character: str | None,
-                    split_by_character_only: bool,
-                    pipeline_status: dict,
-                    pipeline_status_lock: asyncio.Lock,
-                    semaphore: asyncio.Semaphore,
                 ) -> None:
-                    """Process single document"""
-                    # Initialize variables at the start to prevent UnboundLocalError in error handling
+                    """Stage 1: chunk, embed chunks, store, mark EMBEDDED, enqueue."""
+                    nonlocal embed_count
                     file_path = _resolve_doc_file_path(status_doc=status_doc)
-                    current_file_number = 0
-                    file_extraction_stage_ok = False
+                    embed_stage_tasks: list = []
                     processing_start_time = int(time.time())
-                    first_stage_tasks = []
-                    entity_relation_task = None
                     chunks: dict[str, Any] = {}
                     content_data: dict[str, Any] | None = None
 
-                    def get_failed_chunk_snapshot() -> tuple[list[str], int]:
+                    def get_embed_chunk_snapshot() -> tuple[list[str], int]:
                         if chunks:
-                            chunk_ids = list(chunks.keys())
-                            return chunk_ids, len(chunk_ids)
+                            return list(chunks.keys()), len(chunks)
                         return _chunk_fields_from_status_doc(status_doc)
 
-                    async with semaphore:
-                        nonlocal processed_count
-                        # Initialize to prevent UnboundLocalError in error handling
-                        first_stage_tasks = []
-                        entity_relation_task = None
+                    async with embed_semaphore:
                         try:
-                            # Resolve file_path from full_docs before honoring a queued
-                            # cancellation so corrupted doc_status placeholders do not
-                            # get written back again during retry/cancel flows.
+                            # Resolve file_path before cancellation check so path is preserved
                             content_data = await self.full_docs.get_by_id(doc_id)
                             if content_data:
                                 file_path = _resolve_doc_file_path(
@@ -1913,46 +1925,16 @@ class LightRAG:
                                 )
                                 status_doc.file_path = file_path
 
-                            # Check for cancellation before starting document processing.
-                            # file_path is resolved before this check so queued documents
-                            # do not lose their source path on early cancellation.
                             async with pipeline_status_lock:
                                 if pipeline_status.get("cancellation_requested", False):
                                     raise PipelineCancelledException("User cancelled")
 
-                            async with pipeline_status_lock:
-                                # Update processed file count and save current file number
-                                processed_count += 1
-                                current_file_number = (
-                                    processed_count  # Save the current file number
-                                )
-                                pipeline_status["cur_batch"] = processed_count
-
-                                log_message = f"Extracting stage {current_file_number}/{total_files}: {file_path}"
-                                logger.info(log_message)
-                                pipeline_status["history_messages"].append(log_message)
-                                log_message = f"Processing d-id: {doc_id}"
-                                logger.info(log_message)
-                                pipeline_status["latest_message"] = log_message
-                                pipeline_status["history_messages"].append(log_message)
-
-                                # Prevent memory growth: keep only latest 5000 messages when exceeding 10000
-                                if len(pipeline_status["history_messages"]) > 10000:
-                                    logger.info(
-                                        f"Trimming pipeline history from {len(pipeline_status['history_messages'])} to 5000 messages"
-                                    )
-                                    # Trim in place so Manager.list-backed shared state
-                                    # remains appendable and visible across processes.
-                                    del pipeline_status["history_messages"][:-5000]
-
-                            # Get document content from full_docs
                             if not content_data:
                                 raise Exception(
                                     f"Document content not found in full_docs for doc_id: {doc_id}"
                                 )
                             content = content_data["content"]
 
-                            # Call chunking function, supporting both sync and async implementations
                             chunking_result = self.chunking_func(
                                 self.tokenizer,
                                 content,
@@ -1962,25 +1944,21 @@ class LightRAG:
                                 self.chunk_token_size,
                                 file_path=file_path,
                             )
-
-                            # If result is awaitable, await to get actual result
                             if inspect.isawaitable(chunking_result):
                                 chunking_result = await chunking_result
 
-                            # Validate return type
                             if not isinstance(chunking_result, (list, tuple)):
                                 raise TypeError(
                                     f"chunking_func must return a list or tuple of dicts, "
                                     f"got {type(chunking_result)}"
                                 )
 
-                            # Build chunks dictionary
-                            chunks: dict[str, Any] = {
+                            chunks = {
                                 compute_mdhash_id(dp["content"], prefix="chunk-"): {
                                     **dp,
                                     "full_doc_id": doc_id,
-                                    "file_path": file_path,  # Add file path to each chunk
-                                    "llm_cache_list": [],  # Initialize empty LLM cache list for each chunk
+                                    "file_path": file_path,
+                                    "llm_cache_list": [],
                                 }
                                 for dp in chunking_result
                             }
@@ -1988,116 +1966,77 @@ class LightRAG:
                             if not chunks:
                                 logger.warning("No document chunks to process")
 
-                            # Record processing start time
-                            processing_start_time = int(time.time())
-
-                            # Check for cancellation before entity extraction
                             async with pipeline_status_lock:
                                 if pipeline_status.get("cancellation_requested", False):
                                     raise PipelineCancelledException("User cancelled")
 
-                            # Process document in two stages
-                            # Stage 1: Process text chunks and docs (parallel execution)
-                            doc_status_task = asyncio.create_task(
-                                self.doc_status.upsert(
-                                    {
-                                        doc_id: {
-                                            "status": DocStatus.PROCESSING,
-                                            "chunks_count": len(chunks),
-                                            "chunks_list": list(
-                                                chunks.keys()
-                                            ),  # Save chunks list
-                                            "content_summary": status_doc.content_summary,
-                                            "content_length": status_doc.content_length,
-                                            "created_at": status_doc.created_at,
-                                            "updated_at": datetime.now(
-                                                timezone.utc
-                                            ).isoformat(),
-                                            "file_path": file_path,
-                                            "track_id": status_doc.track_id,  # Preserve existing track_id
-                                            "metadata": {
-                                                "processing_start_time": processing_start_time
-                                            },
+                            # Parallel: embed chunks into VDB, store raw text, update status
+                            embed_stage_tasks = [
+                                asyncio.create_task(
+                                    self.doc_status.upsert(
+                                        {
+                                            doc_id: {
+                                                "status": DocStatus.EMBEDDED,
+                                                "chunks_count": len(chunks),
+                                                "chunks_list": list(chunks.keys()),
+                                                "content_summary": status_doc.content_summary,
+                                                "content_length": status_doc.content_length,
+                                                "created_at": status_doc.created_at,
+                                                "updated_at": datetime.now(
+                                                    timezone.utc
+                                                ).isoformat(),
+                                                "file_path": file_path,
+                                                "track_id": status_doc.track_id,
+                                                "metadata": {
+                                                    "processing_start_time": processing_start_time
+                                                },
+                                            }
                                         }
-                                    }
-                                )
-                            )
-                            chunks_vdb_task = asyncio.create_task(
-                                self.chunks_vdb.upsert(chunks)
-                            )
-                            text_chunks_task = asyncio.create_task(
-                                self.text_chunks.upsert(chunks)
-                            )
-
-                            # First stage tasks (parallel execution)
-                            first_stage_tasks = [
-                                doc_status_task,
-                                chunks_vdb_task,
-                                text_chunks_task,
+                                    )
+                                ),
+                                asyncio.create_task(self.chunks_vdb.upsert(chunks)),
+                                asyncio.create_task(self.text_chunks.upsert(chunks)),
                             ]
-                            entity_relation_task = None
+                            await asyncio.gather(*embed_stage_tasks)
 
-                            # Execute first stage tasks
-                            await asyncio.gather(*first_stage_tasks)
+                            # Update in-memory status_doc so extract stage can read chunks_list
+                            status_doc.chunks_list = list(chunks.keys())
+                            status_doc.chunks_count = len(chunks)
+                            status_doc.file_path = file_path
 
-                            # Stage 2: Process entity relation graph (after text_chunks are saved)
-                            entity_relation_task = asyncio.create_task(
-                                self._process_extract_entities(
-                                    chunks, pipeline_status, pipeline_status_lock
+                            embed_count += 1
+                            async with pipeline_status_lock:
+                                log_message = (
+                                    f"Embedded {embed_count}/{total_files}: {file_path}"
                                 )
-                            )
-                            chunk_results = await entity_relation_task
-                            file_extraction_stage_ok = True
+                                logger.info(log_message)
+                                pipeline_status["history_messages"].append(log_message)
+                                if len(pipeline_status["history_messages"]) > 10000:
+                                    del pipeline_status["history_messages"][:-5000]
+
+                            await embedded_queue.put(doc_id)
 
                         except Exception as e:
-                            # Check if this is a user cancellation
-                            if isinstance(e, PipelineCancelledException):
-                                # User cancellation - log brief message only, no traceback
-                                error_msg = f"User cancelled {current_file_number}/{total_files}: {file_path}"
-                                logger.warning(error_msg)
-                                async with pipeline_status_lock:
-                                    pipeline_status["latest_message"] = error_msg
-                                    pipeline_status["history_messages"].append(
-                                        error_msg
-                                    )
-                            else:
-                                # Other exceptions - log with traceback
-                                logger.error(traceback.format_exc())
-                                error_msg = f"Failed to extract document {current_file_number}/{total_files}: {file_path}"
-                                logger.error(error_msg)
-                                async with pipeline_status_lock:
-                                    pipeline_status["latest_message"] = error_msg
-                                    pipeline_status["history_messages"].append(
-                                        traceback.format_exc()
-                                    )
-                                    pipeline_status["history_messages"].append(
-                                        error_msg
-                                    )
-
-                            # Cancel tasks that are not yet completed
-                            all_tasks = first_stage_tasks + (
-                                [entity_relation_task] if entity_relation_task else []
-                            )
-                            for task in all_tasks:
+                            for task in embed_stage_tasks:
                                 if task and not task.done():
                                     task.cancel()
 
-                            # Persistent llm cache with error handling
-                            if self.llm_response_cache:
-                                try:
-                                    await self.llm_response_cache.index_done_callback()
-                                except Exception as persist_error:
-                                    logger.error(
-                                        f"Failed to persist LLM cache: {persist_error}"
-                                    )
+                            if isinstance(e, PipelineCancelledException):
+                                error_msg = f"User cancelled embedding {file_path}"
+                                logger.warning(error_msg)
+                            else:
+                                logger.error(traceback.format_exc())
+                                error_msg = f"Failed to embed document {file_path}"
+                                logger.error(error_msg)
 
-                            # Record processing end time for failed case
+                            async with pipeline_status_lock:
+                                pipeline_status["latest_message"] = error_msg
+                                pipeline_status["history_messages"].append(error_msg)
+
                             processing_end_time = int(time.time())
                             failed_chunks_list, failed_chunks_count = (
-                                get_failed_chunk_snapshot()
+                                get_embed_chunk_snapshot()
                             )
-
-                            # Update document status to failed
                             await self.doc_status.upsert(
                                 {
                                     doc_id: {
@@ -2112,7 +2051,7 @@ class LightRAG:
                                             timezone.utc
                                         ).isoformat(),
                                         "file_path": file_path,
-                                        "track_id": status_doc.track_id,  # Preserve existing track_id
+                                        "track_id": status_doc.track_id,
                                         "metadata": {
                                             "processing_start_time": processing_start_time,
                                             "processing_end_time": processing_end_time,
@@ -2121,167 +2060,335 @@ class LightRAG:
                                 }
                             )
 
-                        # Concurrency is controlled by keyed lock for individual entities and relationships
-                        if file_extraction_stage_ok:
-                            try:
-                                # Check for cancellation before merge
-                                async with pipeline_status_lock:
-                                    if pipeline_status.get(
-                                        "cancellation_requested", False
-                                    ):
-                                        raise PipelineCancelledException(
-                                            "User cancelled"
-                                        )
+                async def extract_document(
+                    doc_id: str,
+                    status_doc: DocProcessingStatus,
+                    current_file_number: int,
+                ) -> tuple | None:
+                    """Stage 2a: load chunks and run LLM extraction.
 
-                                # Use chunk_results from entity_relation_task
-                                await merge_nodes_and_edges(
-                                    chunk_results=chunk_results,  # result collected from entity_relation_task
-                                    knowledge_graph_inst=self.chunk_entity_relation_graph,
-                                    entity_vdb=self.entities_vdb,
-                                    relationships_vdb=self.relationships_vdb,
-                                    global_config=asdict(self),
-                                    full_entities_storage=self.full_entities,
-                                    full_relations_storage=self.full_relations,
-                                    doc_id=doc_id,
-                                    pipeline_status=pipeline_status,
-                                    pipeline_status_lock=pipeline_status_lock,
-                                    llm_response_cache=self.llm_response_cache,
-                                    entity_chunks_storage=self.entity_chunks,
-                                    relation_chunks_storage=self.relation_chunks,
-                                    current_file_number=current_file_number,
-                                    total_files=total_files,
-                                    file_path=file_path,
-                                )
-
-                                # Record processing end time
-                                processing_end_time = int(time.time())
-
-                                await self.doc_status.upsert(
-                                    {
-                                        doc_id: {
-                                            "status": DocStatus.PROCESSED,
-                                            "chunks_count": len(chunks),
-                                            "chunks_list": list(chunks.keys()),
-                                            "content_summary": status_doc.content_summary,
-                                            "content_length": status_doc.content_length,
-                                            "created_at": status_doc.created_at,
-                                            "updated_at": datetime.now(
-                                                timezone.utc
-                                            ).isoformat(),
-                                            "file_path": file_path,
-                                            "track_id": status_doc.track_id,  # Preserve existing track_id
-                                            "metadata": {
-                                                "processing_start_time": processing_start_time,
-                                                "processing_end_time": processing_end_time,
-                                            },
-                                        }
-                                    }
-                                )
-
-                                # Call _insert_done after processing each file
-                                await self._insert_done()
-
-                                async with pipeline_status_lock:
-                                    log_message = f"Completed processing file {current_file_number}/{total_files}: {file_path}"
-                                    logger.info(log_message)
-                                    pipeline_status["latest_message"] = log_message
-                                    pipeline_status["history_messages"].append(
-                                        log_message
-                                    )
-
-                            except Exception as e:
-                                # Check if this is a user cancellation
-                                if isinstance(e, PipelineCancelledException):
-                                    # User cancellation - log brief message only, no traceback
-                                    error_msg = f"User cancelled during merge {current_file_number}/{total_files}: {file_path}"
-                                    logger.warning(error_msg)
-                                    async with pipeline_status_lock:
-                                        pipeline_status["latest_message"] = error_msg
-                                        pipeline_status["history_messages"].append(
-                                            error_msg
-                                        )
-                                else:
-                                    # Other exceptions - log with traceback
-                                    logger.error(traceback.format_exc())
-                                    error_msg = f"Merging stage failed in document {current_file_number}/{total_files}: {file_path}"
-                                    logger.error(error_msg)
-                                    async with pipeline_status_lock:
-                                        pipeline_status["latest_message"] = error_msg
-                                        pipeline_status["history_messages"].append(
-                                            traceback.format_exc()
-                                        )
-                                        pipeline_status["history_messages"].append(
-                                            error_msg
-                                        )
-
-                                # Persistent llm cache with error handling
-                                if self.llm_response_cache:
-                                    try:
-                                        await self.llm_response_cache.index_done_callback()
-                                    except Exception as persist_error:
-                                        logger.error(
-                                            f"Failed to persist LLM cache: {persist_error}"
-                                        )
-
-                                # Record processing end time for failed case
-                                processing_end_time = int(time.time())
-                                failed_chunks_list, failed_chunks_count = (
-                                    get_failed_chunk_snapshot()
-                                )
-
-                                # Update document status to failed
-                                await self.doc_status.upsert(
-                                    {
-                                        doc_id: {
-                                            "status": DocStatus.FAILED,
-                                            "error_msg": str(e),
-                                            "chunks_count": failed_chunks_count,
-                                            "chunks_list": failed_chunks_list,
-                                            "content_summary": status_doc.content_summary,
-                                            "content_length": status_doc.content_length,
-                                            "created_at": status_doc.created_at,
-                                            "updated_at": datetime.now(
-                                                timezone.utc
-                                            ).isoformat(),
-                                            "file_path": file_path,
-                                            "track_id": status_doc.track_id,  # Preserve existing track_id
-                                            "metadata": {
-                                                "processing_start_time": processing_start_time,
-                                                "processing_end_time": processing_end_time,
-                                            },
-                                        }
-                                    }
-                                )
-
-                # Create processing tasks for all documents
-                doc_tasks = []
-                for doc_id, status_doc in to_process_docs.items():
-                    doc_tasks.append(
-                        process_document(
-                            doc_id,
-                            status_doc,
-                            split_by_character,
-                            split_by_character_only,
-                            pipeline_status,
-                            pipeline_status_lock,
-                            semaphore,
-                        )
+                    Returns (chunks, chunk_results, file_path, processing_start_time)
+                    so the caller can fire merge_document as a background task and
+                    immediately start extracting the next document.  Returns None on
+                    failure (doc already marked FAILED before returning).
+                    """
+                    file_path = status_doc.file_path or _resolve_doc_file_path(
+                        status_doc=status_doc
                     )
+                    processing_start_time = int(time.time())
+                    chunk_ids = status_doc.chunks_list or []
+                    chunks: dict[str, Any] = {}
+                    entity_relation_task = None
 
-                # Wait for all document processing to complete
-                try:
-                    await asyncio.gather(*doc_tasks)
-                except PipelineCancelledException:
-                    # Cancel all remaining tasks
-                    for task in doc_tasks:
-                        if not task.done():
-                            task.cancel()
+                    def get_extract_chunk_snapshot() -> tuple[list[str], int]:
+                        if chunks:
+                            return list(chunks.keys()), len(chunks)
+                        return _chunk_fields_from_status_doc(status_doc)
 
-                    # Wait for all tasks to complete cancellation
-                    await asyncio.wait(doc_tasks, return_when=asyncio.ALL_COMPLETED)
+                    try:
+                        async with pipeline_status_lock:
+                            if pipeline_status.get("cancellation_requested", False):
+                                raise PipelineCancelledException("User cancelled")
 
-                    # Exit directly (document statuses already updated in process_document)
-                    return
+                        async with pipeline_status_lock:
+                            log_message = f"Extracting stage {current_file_number}/{total_files}: {file_path}"
+                            logger.info(log_message)
+                            pipeline_status["history_messages"].append(log_message)
+                            log_message = f"Processing d-id: {doc_id}"
+                            logger.info(log_message)
+                            pipeline_status["latest_message"] = log_message
+                            pipeline_status["history_messages"].append(log_message)
+                            if len(pipeline_status["history_messages"]) > 10000:
+                                logger.info(
+                                    f"Trimming pipeline history from {len(pipeline_status['history_messages'])} to 5000 messages"
+                                )
+                                del pipeline_status["history_messages"][:-5000]
+
+                        # Mark as PROCESSING so the UI shows active LLM extraction
+                        await self.doc_status.upsert(
+                            {
+                                doc_id: {
+                                    "status": DocStatus.PROCESSING,
+                                    "content_summary": status_doc.content_summary,
+                                    "content_length": status_doc.content_length,
+                                    "chunks_count": len(chunk_ids),
+                                    "chunks_list": chunk_ids,
+                                    "file_path": file_path,
+                                    "created_at": status_doc.created_at or datetime.now(timezone.utc).isoformat(),
+                                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                                    "track_id": status_doc.track_id,
+                                    "metadata": status_doc.metadata,
+                                }
+                            }
+                        )
+
+                        # Load chunks from text_chunks storage (written during embedding stage)
+                        if chunk_ids:
+                            chunk_data_list = await self.text_chunks.get_by_ids(
+                                chunk_ids
+                            )
+                            chunks = {
+                                cid: cdata
+                                for cid, cdata in zip(chunk_ids, chunk_data_list)
+                                if cdata is not None
+                            }
+
+                        if not chunks:
+                            logger.warning(
+                                f"No chunks found for doc_id: {doc_id}, skipping LLM extraction"
+                            )
+                            return None
+
+                        entity_relation_task = asyncio.create_task(
+                            self._process_extract_entities(
+                                chunks, pipeline_status, pipeline_status_lock
+                            )
+                        )
+                        chunk_results = await entity_relation_task
+                        return (chunks, chunk_results, file_path, processing_start_time)
+
+                    except Exception as e:
+                        if entity_relation_task and not entity_relation_task.done():
+                            entity_relation_task.cancel()
+
+                        if isinstance(e, PipelineCancelledException):
+                            error_msg = f"User cancelled {current_file_number}/{total_files}: {file_path}"
+                            logger.warning(error_msg)
+                        else:
+                            logger.error(traceback.format_exc())
+                            error_msg = f"Failed to extract document {current_file_number}/{total_files}: {file_path}"
+                            logger.error(error_msg)
+                            async with pipeline_status_lock:
+                                pipeline_status["history_messages"].append(
+                                    traceback.format_exc()
+                                )
+
+                        async with pipeline_status_lock:
+                            pipeline_status["latest_message"] = error_msg
+                            pipeline_status["history_messages"].append(error_msg)
+
+                        if self.llm_response_cache:
+                            try:
+                                await self.llm_response_cache.index_done_callback()
+                            except Exception as persist_error:
+                                logger.error(
+                                    f"Failed to persist LLM cache: {persist_error}"
+                                )
+
+                        failed_chunks_list, failed_chunks_count = (
+                            get_extract_chunk_snapshot()
+                        )
+                        await self.doc_status.upsert(
+                            {
+                                doc_id: {
+                                    "status": DocStatus.FAILED,
+                                    "error_msg": str(e),
+                                    "chunks_count": failed_chunks_count,
+                                    "chunks_list": failed_chunks_list,
+                                    "content_summary": status_doc.content_summary,
+                                    "content_length": status_doc.content_length,
+                                    "created_at": status_doc.created_at,
+                                    "updated_at": datetime.now(
+                                        timezone.utc
+                                    ).isoformat(),
+                                    "file_path": file_path,
+                                    "track_id": status_doc.track_id,
+                                    "metadata": {
+                                        "processing_start_time": processing_start_time,
+                                        "processing_end_time": int(time.time()),
+                                    },
+                                }
+                            }
+                        )
+                        return None
+
+                async def merge_document(
+                    doc_id: str,
+                    status_doc: DocProcessingStatus,
+                    chunks: dict[str, Any],
+                    chunk_results: Any,
+                    file_path: str,
+                    processing_start_time: int,
+                    current_file_number: int,
+                ) -> None:
+                    """Stage 2b: merge extraction results into graph/vector stores.
+
+                    Runs as a background asyncio task so extract_workers can keep the
+                    GPU busy with the next document while this I/O-bound work proceeds.
+                    """
+                    try:
+                        async with pipeline_status_lock:
+                            if pipeline_status.get(
+                                "cancellation_requested", False
+                            ):
+                                raise PipelineCancelledException("User cancelled")
+
+                        await merge_nodes_and_edges(
+                            chunk_results=chunk_results,
+                            knowledge_graph_inst=self.chunk_entity_relation_graph,
+                            entity_vdb=self.entities_vdb,
+                            relationships_vdb=self.relationships_vdb,
+                            global_config=asdict(self),
+                            full_entities_storage=self.full_entities,
+                            full_relations_storage=self.full_relations,
+                            doc_id=doc_id,
+                            pipeline_status=pipeline_status,
+                            pipeline_status_lock=pipeline_status_lock,
+                            llm_response_cache=self.llm_response_cache,
+                            entity_chunks_storage=self.entity_chunks,
+                            relation_chunks_storage=self.relation_chunks,
+                            current_file_number=current_file_number,
+                            total_files=total_files,
+                            file_path=file_path,
+                        )
+
+                        processing_end_time = int(time.time())
+
+                        await self.doc_status.upsert(
+                            {
+                                doc_id: {
+                                    "status": DocStatus.PROCESSED,
+                                    "chunks_count": len(chunks),
+                                    "chunks_list": list(chunks.keys()),
+                                    "content_summary": status_doc.content_summary,
+                                    "content_length": status_doc.content_length,
+                                    "created_at": status_doc.created_at,
+                                    "updated_at": datetime.now(
+                                        timezone.utc
+                                    ).isoformat(),
+                                    "file_path": file_path,
+                                    "track_id": status_doc.track_id,
+                                    "metadata": {
+                                        "processing_start_time": processing_start_time,
+                                        "processing_end_time": processing_end_time,
+                                    },
+                                }
+                            }
+                        )
+
+                        await self._insert_done()
+
+                        async with pipeline_status_lock:
+                            log_message = f"Completed processing file {current_file_number}/{total_files}: {file_path}"
+                            logger.info(log_message)
+                            pipeline_status["latest_message"] = log_message
+                            pipeline_status["history_messages"].append(log_message)
+
+                    except Exception as e:
+                        if isinstance(e, PipelineCancelledException):
+                            error_msg = f"User cancelled during merge {current_file_number}/{total_files}: {file_path}"
+                            logger.warning(error_msg)
+                        else:
+                            logger.error(traceback.format_exc())
+                            error_msg = f"Merging stage failed in document {current_file_number}/{total_files}: {file_path}"
+                            logger.error(error_msg)
+                            async with pipeline_status_lock:
+                                pipeline_status["history_messages"].append(
+                                    traceback.format_exc()
+                                )
+
+                        async with pipeline_status_lock:
+                            pipeline_status["latest_message"] = error_msg
+                            pipeline_status["history_messages"].append(error_msg)
+
+                        if self.llm_response_cache:
+                            try:
+                                await self.llm_response_cache.index_done_callback()
+                            except Exception as persist_error:
+                                logger.error(
+                                    f"Failed to persist LLM cache: {persist_error}"
+                                )
+
+                        processing_end_time = int(time.time())
+                        await self.doc_status.upsert(
+                            {
+                                doc_id: {
+                                    "status": DocStatus.FAILED,
+                                    "error_msg": str(e),
+                                    "chunks_count": len(chunks),
+                                    "chunks_list": list(chunks.keys()),
+                                    "content_summary": status_doc.content_summary,
+                                    "content_length": status_doc.content_length,
+                                    "created_at": status_doc.created_at,
+                                    "updated_at": datetime.now(
+                                        timezone.utc
+                                    ).isoformat(),
+                                    "file_path": file_path,
+                                    "track_id": status_doc.track_id,
+                                    "metadata": {
+                                        "processing_start_time": processing_start_time,
+                                        "processing_end_time": processing_end_time,
+                                    },
+                                }
+                            }
+                        )
+
+                async def extract_worker() -> None:
+                    """Consume EMBEDDED docs: await LLM extraction, fire merge in background."""
+                    nonlocal extract_count
+                    pending_merges: list[asyncio.Task] = []
+
+                    while True:
+                        doc_id = await embedded_queue.get()
+                        if doc_id is None:  # sentinel: no more docs to process
+                            break
+                        status_doc = to_process_docs[doc_id]
+                        async with pipeline_status_lock:
+                            extract_count += 1
+                            current_file_number = extract_count
+                            pipeline_status["cur_batch"] = extract_count
+
+                        result = await extract_document(
+                            doc_id, status_doc, current_file_number
+                        )
+                        if result is not None:
+                            chunks, chunk_results, file_path, processing_start_time = result
+                            # Fire merge as a background task so this worker can
+                            # immediately start extracting the next document, keeping
+                            # the GPU fed during Neo4j/Postgres I/O.
+                            pending_merges.append(
+                                asyncio.create_task(
+                                    merge_document(
+                                        doc_id,
+                                        status_doc,
+                                        chunks,
+                                        chunk_results,
+                                        file_path,
+                                        processing_start_time,
+                                        current_file_number,
+                                    )
+                                )
+                            )
+
+                        # Prune finished merge tasks to keep the list bounded
+                        pending_merges = [t for t in pending_merges if not t.done()]
+
+                    # All extractions done — wait for any in-flight merges
+                    if pending_merges:
+                        await asyncio.gather(*pending_merges, return_exceptions=True)
+
+                # Use LLM concurrency limit for workers: more workers means some can be
+                # in the merge/I/O phase while others keep the GPU fed with LLM requests.
+                num_extract_workers = max(
+                    self.max_parallel_insert, self.llm_model_max_async
+                )
+                extract_worker_tasks = [
+                    asyncio.create_task(extract_worker())
+                    for _ in range(num_extract_workers)
+                ]
+
+                # Run embedding for all non-EMBEDDED docs concurrently
+                # (rate-limited by embed_semaphore and the embedding function's own async limit)
+                embed_doc_tasks = [
+                    asyncio.create_task(embed_document(doc_id, sd))
+                    for doc_id, sd in docs_to_embed.items()
+                ]
+                await asyncio.gather(*embed_doc_tasks)
+
+                # All embedding done: send one sentinel per worker to stop them
+                for _ in range(num_extract_workers):
+                    await embedded_queue.put(None)
+                await asyncio.gather(*extract_worker_tasks)
 
                 # Check if there's a pending request to process more documents (with lock)
                 has_pending_request = False
@@ -2301,7 +2408,12 @@ class LightRAG:
 
                 # Check for pending documents again
                 to_process_docs = await self.doc_status.get_docs_by_statuses(
-                    [DocStatus.PROCESSING, DocStatus.FAILED, DocStatus.PENDING]
+                    [
+                        DocStatus.PROCESSING,
+                        DocStatus.FAILED,
+                        DocStatus.PENDING,
+                        DocStatus.EMBEDDED,
+                    ]
                 )
 
         finally:
