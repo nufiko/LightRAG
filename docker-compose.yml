@@ -15,6 +15,28 @@ services:
       timeout: 5s
       retries: 10
 
+  neo4j:
+    image: neo4j:5-community
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - neo4j_data:/data
+    environment:
+      NEO4J_AUTH: neo4j/lightrag1234
+      NEO4J_dbms_default__database: neo4j
+      NEO4J_server_memory_heap_initial__size: 512m
+      NEO4J_server_memory_heap_max__size: 2G
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'PORT_HEX="$(printf ''%04X'' 7687)"; cat /proc/net/tcp /proc/net/tcp6 2>/dev/null | grep -q ":$${PORT_HEX} "'
+      interval: 10s
+      timeout: 3s
+      retries: 120
+      start_period: 30s
+    restart: unless-stopped
+
   lightrag:
     image: ghcr.io/hkuds/lightrag:latest
     build:
@@ -46,3 +68,4 @@ services:
 
 volumes:
   postgres_data:
+  neo4j_data:
