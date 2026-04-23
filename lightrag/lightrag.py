@@ -519,6 +519,16 @@ class LightRAG:
     auto_manage_storages_states: bool = field(default=False)
     """If True, lightrag will automatically calls initialize_storages and finalize_storages at the appropriate times."""
 
+    code_graph_enabled: bool = field(
+        default=os.getenv("CODE_GRAPH_ENABLED", "false").strip().lower()
+        in ("1", "true", "yes", "on")
+    )
+    """If True, code files are indexed via tree-sitter symbol extraction instead of
+    LLM entity extraction — deterministic, ~free, and produces real call/import/
+    inherit edges in the graph. Prose files (docs, markdown, pdfs, ...) are
+    unaffected and still go through the LLM pipeline. Requires the `codegraph`
+    extra: `pip install lightrag-hku[codegraph]`."""
+
     cosine_better_than_threshold: float = field(
         default=float(os.getenv("COSINE_THRESHOLD", 0.2))
     )
@@ -2014,7 +2024,56 @@ class LightRAG:
                                 if len(pipeline_status["history_messages"]) > 10000:
                                     del pipeline_status["history_messages"][:-5000]
 
-                            await embedded_queue.put(doc_id)
+                            # Code-graph short-circuit: if enabled and the file has a
+                            # registered tree-sitter extractor, run deterministic
+                            # symbol extraction instead of queueing for LLM
+                            # extraction. On failure, fall back to the LLM path so
+                            # the doc is never silently dropped.
+                            code_graph_handled = False
+                            if self.code_graph_enabled:
+                                from lightrag.codegraph import is_code_file
+                                from lightrag.codegraph.ingest import ingest_code_file
+
+                                if is_code_file(file_path):
+                                    try:
+                                        counts = await ingest_code_file(
+                                            self, file_path, content
+                                        )
+                                        await self.doc_status.upsert(
+                                            {
+                                                doc_id: {
+                                                    "status": DocStatus.PROCESSED,
+                                                    "chunks_count": len(chunks),
+                                                    "chunks_list": list(chunks.keys()),
+                                                    "content_summary": status_doc.content_summary,
+                                                    "content_length": status_doc.content_length,
+                                                    "created_at": status_doc.created_at,
+                                                    "updated_at": datetime.now(
+                                                        timezone.utc
+                                                    ).isoformat(),
+                                                    "file_path": file_path,
+                                                    "track_id": status_doc.track_id,
+                                                }
+                                            }
+                                        )
+                                        async with pipeline_status_lock:
+                                            msg = (
+                                                f"Codegraph {file_path}: "
+                                                f"{counts['nodes']} nodes, "
+                                                f"{counts['edges']} edges, "
+                                                f"{counts['purged_nodes']} purged"
+                                            )
+                                            logger.info(msg)
+                                            pipeline_status["history_messages"].append(msg)
+                                        code_graph_handled = True
+                                    except Exception as e:
+                                        logger.warning(
+                                            f"Codegraph ingest failed for {file_path}: {e}; "
+                                            "falling back to LLM extraction"
+                                        )
+
+                            if not code_graph_handled:
+                                await embedded_queue.put(doc_id)
 
                         except Exception as e:
                             for task in embed_stage_tasks:
