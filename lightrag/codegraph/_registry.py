@@ -6,11 +6,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from lightrag.codegraph import _csharp, _javascript, _python, _typescript
+from lightrag.codegraph import _csharp, _java, _javascript, _python, _typescript
 from lightrag.codegraph._base import SymbolExtractor
 
 _REGISTRY: dict[str, SymbolExtractor] = {}
-for _mod in (_csharp, _javascript, _python, _typescript):
+for _mod in (_csharp, _java, _javascript, _python, _typescript):
     for _ext in _mod.EXTENSIONS:
         _REGISTRY[_ext] = _mod
 
