@@ -1961,35 +1961,40 @@ async def run_scanning_process(
             await rag.apipeline_process_enqueue_documents()
             return
 
-        # --- Dedup phase ---
+        # --- Dedup phase (single bulk query) ---
         await _set_status(f"Checking {total_files} files for duplicates...", total=total_files)
+
+        # Build file_label list once — avoids recomputing in the enqueue loop.
+        file_labels: list[str] = []
+        for file_path in new_files:
+            try:
+                file_labels.append(
+                    str(file_path.relative_to(doc_manager.input_dir)).replace("\\", "/")
+                )
+            except ValueError:
+                file_labels.append(file_path.name)
+
+        # One round-trip instead of N sequential queries.
+        existing_statuses = await rag.doc_status.get_statuses_by_file_paths(file_labels)
 
         valid_files = []
         processed_files = []
-
-        for i, file_path in enumerate(new_files):
-            try:
-                file_label = str(file_path.relative_to(doc_manager.input_dir)).replace("\\", "/")
-            except ValueError:
-                file_label = file_path.name
-
-            existing_doc_data = await rag.doc_status.get_doc_by_file_path(file_label)
-            if existing_doc_data and existing_doc_data.get("status") == "processed":
+        for file_path, file_label in zip(new_files, file_labels):
+            if existing_statuses.get(file_label) == "processed":
                 processed_files.append(file_label)
             else:
                 valid_files.append(file_path)
 
-            if (i + 1) % _SCAN_BATCH_SIZE == 0:
-                msg = f"Checked {i + 1}/{total_files} files — {len(valid_files)} to index, {len(processed_files)} already processed"
-                await _set_status(msg, cur=i + 1)
-                logger.info(msg)
+        msg = f"Checked {total_files} files — {len(valid_files)} to index, {len(processed_files)} already processed"
+        await _set_status(msg, cur=total_files)
+        logger.info(msg)
 
         if not valid_files:
             await _set_status("Nothing to index — all files already processed.", busy=False)
             logger.info("No files to process after filtering already processed files.")
             return
 
-        # --- Batch-index phase ---
+        # --- Batch-index phase (parallel enqueue within each batch) ---
         total_valid = len(valid_files)
         total_batches = (total_valid + _SCAN_BATCH_SIZE - 1) // _SCAN_BATCH_SIZE
         await _set_status(
@@ -1999,7 +2004,7 @@ async def run_scanning_process(
 
         sorted_files = sorted(valid_files, key=lambda p: get_pinyin_sort_key(str(p)))
 
-        # Enqueue all files in batches (for progress reporting only).
+        # Enqueue files in parallel batches.
         # apipeline_process_enqueue_documents is called ONCE after all files are
         # enqueued — calling it per-batch causes concurrent-processing conflicts
         # where only the first batch gets processed and the rest stay PENDING.
@@ -2011,8 +2016,10 @@ async def run_scanning_process(
             await _set_status(msg, cur=batch_start)
             logger.info(msg)
 
-            for file_path in batch:
-                await pipeline_enqueue_file(rag, file_path, track_id, input_dir=doc_manager.input_dir)
+            await asyncio.gather(*(
+                pipeline_enqueue_file(rag, file_path, track_id, input_dir=doc_manager.input_dir)
+                for file_path in batch
+            ))
 
         await _set_status(
             f"All {total_valid} files enqueued, starting LLM extraction...",

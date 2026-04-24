@@ -875,6 +875,28 @@ class DocStatusStorage(BaseKVStorage, ABC):
             Returns the same format as get_by_ids method
         """
 
+    async def get_statuses_by_file_paths(
+        self, file_paths: list[str]
+    ) -> dict[str, str]:
+        """Return a mapping of file_path → status for the given paths.
+
+        Default implementation falls back to N individual get_doc_by_file_path
+        calls. Storage backends can override with a single bulk query.
+
+        Args:
+            file_paths: List of file paths to look up.
+
+        Returns:
+            Dict mapping each found file_path to its status string.
+            Paths not present in storage are omitted.
+        """
+        result: dict[str, str] = {}
+        for fp in file_paths:
+            doc = await self.get_doc_by_file_path(fp)
+            if doc and doc.get("status"):
+                result[fp] = doc["status"]
+        return result
+
 
 class StoragesStatus(str, Enum):
     """Storages status"""

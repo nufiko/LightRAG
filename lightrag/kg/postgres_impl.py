@@ -3919,7 +3919,7 @@ class PGDocStatusStorage(DocStatusStorage):
             Union[dict[str, Any], None]: Document data if found, None otherwise
             Returns the same format as get_by_id method
         """
-        sql = "select * from LIGHTRAG_DOC_STATUS where workspace=$1 and file_path=$2"
+        sql = "select * from LIGHTRAG_DOC_STATUS where workspace=$1 and file_path=$2 limit 1"
         params = {"workspace": self.workspace, "file_path": file_path}
         result = await self.db.query(sql, list(params.values()), True)
 
@@ -3959,6 +3959,23 @@ class PGDocStatusStorage(DocStatusStorage):
                 error_msg=result[0].get("error_msg"),
                 track_id=result[0].get("track_id"),
             )
+
+    async def get_statuses_by_file_paths(
+        self, file_paths: list[str]
+    ) -> dict[str, str]:
+        """Bulk lookup: return file_path → status for all given paths in one query."""
+        if not file_paths:
+            return {}
+        sql = """
+            SELECT DISTINCT ON (file_path) file_path, status
+              FROM LIGHTRAG_DOC_STATUS
+             WHERE workspace=$1 AND file_path = ANY($2::text[])
+             ORDER BY file_path, updated_at DESC
+        """
+        rows = await self.db.query(sql, [self.workspace, file_paths], True)
+        if not rows:
+            return {}
+        return {row["file_path"]: row["status"] for row in rows}
 
     async def get_status_counts(self) -> dict[str, int]:
         """Get counts of documents in each status"""
