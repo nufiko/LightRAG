@@ -155,3 +155,7 @@ def test_storage_adapter_shapes():
     assert (src, dst) == ("py:x.y", "py:x.z")
     assert edata["relation"] == EDGE_CALLS
     assert edata["line"] == "4"
+    # Explicit direction properties survive backends that lose direction
+    # (e.g. Neo4j undirected storage). Structural queries rely on these.
+    assert edata["src"] == "py:x.y"
+    assert edata["dst"] == "py:x.z"

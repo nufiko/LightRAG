@@ -9,10 +9,7 @@
         "--with", "httpx>=0.25",
         "python",
         "${CLAUDE_PLUGIN_ROOT}/bin/lrag_mcp_proxy.py"
-      ],
-      "env": {
-        "LIGHTRAG_URL": "http://127.0.0.1:9621"
-      }
+      ]
     }
   }
 }

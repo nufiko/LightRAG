@@ -46,24 +46,47 @@ Choose **project scope** to commit the plugin choice to the repo's
 
 ## Configure
 
-Override the server URL and optional API key via env in
-`.mcp.json` at your plugin install path or (if you installed at user
-scope) `~/.claude/.claude-plugin/.mcp.json`:
+The MCP proxy reads two environment variables. Defaults apply when
+unset — point the plugin at a different server by exporting them in
+your shell (they flow through Claude Code into the proxy's subprocess).
+
+| Var | Default | Purpose |
+|---|---|---|
+| `LIGHTRAG_URL` | `http://127.0.0.1:9621` | Base URL of the `lightrag-server` to query |
+| `LIGHTRAG_API_KEY` | empty | Bearer token if the server enforces auth |
+
+### Pointing at a remote / shared server
+
+```bash
+# On Linux / macOS
+export LIGHTRAG_URL="https://rag.internal.groupondev.com:9621"
+export LIGHTRAG_API_KEY="sk-abc123..."
+```
+
+```powershell
+# On Windows PowerShell
+$env:LIGHTRAG_URL   = "https://rag.internal.groupondev.com:9621"
+$env:LIGHTRAG_API_KEY = "sk-abc123..."
+```
+
+Restart Claude Code after changing these so the MCP subprocess
+re-inherits the new values.
+
+### Per-project override
+
+If you want a per-repo `LIGHTRAG_URL` (e.g. a local dev server for one
+checkout, a shared team server for another), add an `env` block in
+the project's `.mcp.json` — that overrides any shell env:
 
 ```json
 {
   "mcpServers": {
     "lightrag": {
-      "env": {
-        "LIGHTRAG_URL": "http://127.0.0.1:9621",
-        "LIGHTRAG_API_KEY": ""
-      }
+      "env": { "LIGHTRAG_URL": "http://localhost:9622" }
     }
   }
 }
 ```
-
-Most setups work with the defaults.
 
 ---
 

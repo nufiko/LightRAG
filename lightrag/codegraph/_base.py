@@ -114,12 +114,22 @@ def node_to_storage(node: CodeNode) -> tuple[str, dict[str, str]]:
 def edge_to_storage(
     edge: CodeEdge,
 ) -> tuple[str, str, dict[str, str]]:
-    """Convert a CodeEdge to the (src, dst, edge_data) triple BaseGraphStorage expects."""
+    """Convert a CodeEdge to the (src, dst, edge_data) triple BaseGraphStorage expects.
+
+    The edge_data dict includes ``src`` and ``dst`` as explicit properties
+    so direction survives the trip through backends that store edges
+    undirectedly (Neo4j's MERGE (a)-[r:DIRECTED]-(b) drops direction;
+    get_all_edges returns each edge twice with swapped endpoints).
+    Structural queries like "who calls X" rely on these fields rather
+    than the backend's source/target.
+    """
     data: dict[str, str] = {
         "relation": edge.relation,
         "file_path": edge.file_path,
         "line": str(edge.line),
         "source_id": f"{edge.file_path}:{edge.line}",
+        "src": edge.source_id,
+        "dst": edge.target_id,
     }
     for k, v in edge.extra.items():
         data[k] = v

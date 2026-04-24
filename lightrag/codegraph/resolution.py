@@ -108,6 +108,10 @@ async def resolve_cross_file_edges(rag: "LightRAG") -> dict[str, int]:
 
             new_dst = candidates[0]
             new_data = {k: v for k, v in edge.items() if k != "unresolved"}
+            # Keep the explicit direction property in sync with the rewritten
+            # target so structural queries keep working post-resolution.
+            if "dst" in new_data:
+                new_data["dst"] = new_dst
 
             if new_dst == old_dst:
                 # Already correct — just drop the marker in place.
