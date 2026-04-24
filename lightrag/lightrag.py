@@ -1482,8 +1482,18 @@ class LightRAG:
         # Exclude IDs of documents that are already enqueued
         unique_new_doc_ids = await self.doc_status.filter_keys(all_new_doc_ids)
 
+        # FAILED documents are eligible for retry — remove them from the
+        # "already exists" set so they go through normal processing rather than
+        # being recorded as duplicates and accumulating junk dup-* rows.
+        already_seen_ids = all_new_doc_ids - unique_new_doc_ids
+        for doc_id in list(already_seen_ids):
+            existing = await self.doc_status.get_by_id(doc_id)
+            if existing and existing.get("status") == DocStatus.FAILED:
+                unique_new_doc_ids.add(doc_id)
+                already_seen_ids.discard(doc_id)
+
         # Handle duplicate documents - create trackable records with current track_id
-        ignored_ids = list(all_new_doc_ids - unique_new_doc_ids)
+        ignored_ids = list(already_seen_ids)
         if ignored_ids:
             duplicate_docs: dict[str, Any] = {}
             for doc_id in ignored_ids:
