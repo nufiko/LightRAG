@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Glob|Grep",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo 'lightrag: For cross-file questions (where X is defined, who calls Y, find code related to Z), consider `mcp__lightrag__search` first — it walks the symbol graph and vector index, not just filenames or literal strings.' 1>&2"
+          }
+        ]
+      }
+    ]
+  }
+}

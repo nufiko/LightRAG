@@ -1,0 +1,28 @@
+{
+  "$schema": "https://raw.githubusercontent.com/anthropics/claude-code/main/schemas/marketplace.schema.json",
+  "name": "lightrag-fork",
+  "owner": {
+    "name": "Michal Ufnal",
+    "email": "c_mufnal@groupon.com"
+  },
+  "plugins": [
+    {
+      "name": "lightrag",
+      "source": "./plugin",
+      "description": "Query a LightRAG code index (semantic search + symbol graph) from Claude Code.",
+      "version": "0.1.0",
+      "author": {
+        "name": "Michal Ufnal",
+        "email": "c_mufnal@groupon.com"
+      },
+      "homepage": "https://github.com/HKUDS/LightRAG",
+      "keywords": [
+        "code-search",
+        "rag",
+        "knowledge-graph",
+        "tree-sitter",
+        "mcp"
+      ]
+    }
+  ]
+}

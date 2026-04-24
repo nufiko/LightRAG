@@ -1,0 +1,9 @@
+{
+  "name": "lightrag",
+  "version": "0.1.0",
+  "description": "Query a LightRAG code index (semantic search + symbol graph) from Claude Code. Expects a lightrag-server running on localhost:9621 with CODE_GRAPH_ENABLED=true.",
+  "author": {
+    "name": "Michal Ufnal",
+    "email": "c_mufnal@groupon.com"
+  }
+}
