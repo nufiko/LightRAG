@@ -2,10 +2,12 @@
 
 ## Status — 2026-04-24
 
-> **~90% of v1 scope shipped, running against user's live stack.** Five
-> language extractors, live pipeline wiring, stale-symbol purge,
-> orphan-on-scan cleanup, three production bug fixes found by real
-> scans. 58 green unit tests + live smoke + end-to-end on user stack.
+> **v1 substantially complete.** Five language extractors, live pipeline
+> wiring, stale-symbol purge, orphan-on-scan cleanup, cross-file
+> resolution, Claude Code plugin v0.2 with semantic search + structural
+> graph walks. 76 green unit tests + live smoke + end-to-end on user
+> stack. Plugin lives in `plugin/` and can be installed via
+> `/plugin marketplace add` from any Claude Code.
 
 ### Completed
 
@@ -23,23 +25,24 @@
 | 2b-fix | `entity_id` field in node_to_storage (Neo4j requirement) | `4758b510` |
 | 2b-fix | Truncate oversized symbol bodies before embedding (Ollama 400) | `73b6d0f9` |
 | Scan | **Orphan cleanup on scan** (opt-in `CLEANUP_ORPHANS_ON_SCAN`) — detects files missing from disk and drops their docs + chunks + entities + codegraph symbols | `2b419d40` |
+| Polish | **Cross-file resolution pass** (opt-in `RESOLVE_CROSS_FILE_ON_SCAN`) — rewrites `py:foo` → `py:pkg.mod.foo` / `java:Animal` → `java:com.coupons.auth.Animal` when a unique real target exists. Same-language tie-break. `prune_orphan_stubs` helper for post-resolution cleanup. Idempotent. | `(resolution commit)` |
+| 5 | **Claude Code plugin v0.1** — `plugin/` subtree with `.claude-plugin/plugin.json`, `.mcp.json`, FastMCP stdio proxy, three skills (`/lightrag:query`, `/lightrag:scan`, `/lightrag:status`), PreToolUse hook on Glob/Grep, README, NOTICE.md attribution | (plugin v0.1 commit) |
+| 5 | **Plugin v0.2 — structural graph walks.** `src`/`dst` edge properties preserve direction through undirected backends (Neo4j). Four new REST endpoints (`/graph/code/callers` / `implementers` / `importers` / `symbol`). Four new MCP tools (`find_callers`, `find_implementers`, `find_importers`, `get_symbol`). New `/lightrag:graph` skill. Plugin env cleanup: defaults moved from `.mcp.json` into the proxy code so shell env (`LIGHTRAG_URL`, `LIGHTRAG_API_KEY`) can point at a remote server. | `276fc343` + (structural commit) |
 | 6 | Extractor smoke tests: 83 Python @ 306 files/s, 92 TS @ 742 files/s, 0 failures | — |
 | 6 | Live smoke vs real NetworkX + nano-vectordb | `7f1094c1` |
 | 6 | **End-to-end on user's Ollama + Postgres + Neo4j stack** — 557 Codegraph success lines observed against `Minas2Test` | (verified 2026-04-24) |
 
-**Unit-test total: 58 passing** (8 Python / 10 TS / 8 C# / 10 JS / 9 Java / 6 ingest / 2 truncation / 5 orphan-cleanup).
+**Unit-test total: 76 passing** (8 Python / 10 TS / 8 C# / 10 JS / 9 Java / 6 ingest / 2 truncation / 5 orphan-cleanup / 9 resolution / 9 structural queries).
 
 ### Remaining, in value order
 
 | # | Item | Plan section | Effort |
 |---|---|---|---|
-| 1 | **Cross-file resolution pass** — walk graph, rewrite `py:foo` → `py:pkg.mod.foo` / `java:Animal` → `java:com.coupons.auth.Animal`; drop `unresolved:true` marker. Makes "who calls X" queries actually navigable; also cleans up NetworkX stub nodes. | Phase 2 polish | ~2 hr |
-| 2 | **Claude Code plugin** (`plugin/` + `.claude-plugin/plugin.json` + `.mcp.json` + skills + hooks + marketplace JSON) | Phase 5 | ~1 day |
-| 3 | **Git hooks skill** (`/lightrag:install-git-hooks`) + `PostToolUse` hook in plugin — auto re-index on pull, branch switch, Claude edits | Phase 5 extra | ~1 hr (after #2) |
-| 4 | **Phase 3 — per-symbol LLM descriptions** (cheap, optional) | Phase 3 | ~2 hr |
-| 5 | **Go extractor** | Phase 1+ | ~30 min |
-| 6 | Phase 0 rebase onto `HKUDS/main` | — | deferrable |
-| 7 | Benchmarks vs graphify / prose LightRAG | Phase 6 | ~1 hr |
+| 1 | **Git hooks skill** (`/lightrag:install-git-hooks`) — drops `post-merge` / `post-checkout` / `post-commit` / `post-rewrite` hooks that `curl POST /documents/scan` with `--max-time 2 \|\| true`. Closes the "what happens on git pull" gap. `PostToolUse` hook in plugin on `Edit`/`Write` for Claude's own edits. | Phase 5 extra | ~1 hr |
+| 2 | **Per-symbol LLM descriptions** — **deprioritized** after analysis: low value for Claude Code specifically. Claude reads code directly; descriptions add staleness risk and minimal retrieval lift. Skip unless human-facing `global`-mode narratives become a priority. | Phase 3 | ~2 hr |
+| 3 | **Go extractor** — **skipped** per user direction ("not used for now"). Re-enable when Go services enter scope. | Phase 1+ | ~30 min |
+| 4 | Phase 0 rebase onto `HKUDS/main` | — | deferrable |
+| 5 | Benchmarks vs graphify / prose LightRAG | Phase 6 | ~1 hr |
 
 ### Production bug fixes surfaced by live running
 
@@ -49,13 +52,18 @@ Three silent-fallback bugs the unit tests with fake storage couldn't catch — a
 2. `Neo4j: node properties must contain an 'entity_id' field` — NetworkX/fake backends don't enforce; Neo4j does.
 3. `Ollama 400: the input length exceeds the context length` — nomic-embed-text v1 has a hard 2048-token architectural limit regardless of `num_ctx` requests.
 
+Plus one direction-correctness bug discovered during v0.2 design:
+
+4. Neo4j stores edges with `MERGE (a)-[r:DIRECTED]-(b)` (undirected). `get_all_edges` returned each edge twice with swapped source/target, breaking direction-sensitive queries like `find_callers`. Fixed by making `edge_to_storage` emit explicit `src` / `dst` properties that every backend preserves as edge data; queries filter on those rather than the backend's own source/target columns.
+
 ### Deviations from original plan
 
 - **Phase 0 rebase was skipped.** Working tree was dirty with user WIP; committing 7 WIP commits then the codegraph work was preferred over rebasing onto a moving upstream target.
-- **Languages over-delivered.** Phase 1 listed Python as the pilot; shipped TS, C#, JS, Java as well — all follow the same `_dispatch` pattern.
+- **Languages over-delivered then scoped down.** Phase 1 listed Python as the pilot; shipped TS, C#, JS, Java (all same `_dispatch` pattern). Go skipped on user direction.
 - **Phase 2 split into 2a/2b.** Standalone `ingest_code_file()` helper (2a) landed before the pipeline hook (2b) so the logic could be unit-tested against a fake LightRAG without touching `lightrag.py` while user WIP was pending.
-- **Workspace-level re-index orchestrator merged into orphan-cleanup.** Original plan listed this as a separate item; the scan already handles add/modify via existing path, so only the delete side needed adding. Shipped as `CLEANUP_ORPHANS_ON_SCAN` in `2b419d40`.
-- **Cross-file resolution deferred.** Unresolved edges flagged `extra={"unresolved": "true"}` so the resolution pass can find them later; they're not blocking v1.
+- **Workspace-level re-index orchestrator merged into orphan-cleanup.** Original plan listed this as a separate item; the scan already handles add/modify via existing path, so only the delete side needed adding. Shipped as `CLEANUP_ORPHANS_ON_SCAN`.
+- **Phase 3 (per-symbol LLM descriptions) deprioritized** after analysis of Claude Code's actual query shape — descriptions help humans doing `global`-mode narrative questions, but Claude reads code directly and usually queries via exact FQN graph walks where descriptions add noise and staleness risk with little retrieval benefit. Kept as a future option, not on the critical path.
+- **Plugin v0.2 scope expanded** beyond the original Phase 5 sketch: v0.2 adds structural graph queries (REST + MCP tools) and a third skill, making the plugin useful for precise "who calls X" workflows not just semantic search.
 
 ---
 
