@@ -265,12 +265,12 @@ async def status() -> str:
         )
     counts_resp.raise_for_status()
     pipeline_resp.raise_for_status()
-    counts = counts_resp.json() or {}
+    counts = counts_resp.json().get("status_counts") or {}
     pipeline = pipeline_resp.json() or {}
 
     lines = ["## Document counts"]
     if counts:
-        for status_name, n in sorted(counts.items(), key=lambda x: -int(x[1])):
+        for status_name, n in sorted(counts.items(), key=lambda x: -x[1]):
             lines.append(f"- **{status_name}**: {n}")
     else:
         lines.append("- (empty)")
@@ -280,8 +280,8 @@ async def status() -> str:
     lines.append(f"- busy: {pipeline.get('busy', False)}")
     if msg := pipeline.get("latest_message"):
         lines.append(f"- latest: {msg}")
-    if cur := pipeline.get("cur"):
-        total = pipeline.get("total", "?")
+    if cur := pipeline.get("cur_batch"):
+        total = pipeline.get("batchs", "?")
         lines.append(f"- progress: {cur}/{total}")
 
     return "\n".join(lines)
