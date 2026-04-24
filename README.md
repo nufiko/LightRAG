@@ -105,6 +105,106 @@
 
 </details>
 
+## Fork additions — Code-graph + Claude Code plugin
+
+> This is a personal fork of [HKUDS/LightRAG](https://github.com/HKUDS/LightRAG).
+> All upstream features are intact. The additions below are layered on top.
+
+### What's added
+
+Standard LightRAG indexes prose through LLM entity extraction — slow,
+expensive, and lossy for source code. This fork adds a **code-graph layer**:
+tree-sitter walks every code file deterministically, emits typed symbol nodes
+and edges, and embeds them without any LLM call during indexing.
+
+**New pipeline for code files:**
+
+```
+code file → tree-sitter extractor → code_function / code_class / code_module nodes
+                                  → calls / imports / inherits / contains edges
+                                  → embed node bodies → graph storage
+                                  (LLM extraction skipped entirely)
+```
+
+**Prose files** (docs, configs, Markdown) are unaffected — they still use the
+normal LLM extraction path.
+
+### Supported languages
+
+| Language | Extensions |
+|---|---|
+| Python | `.py` |
+| TypeScript | `.ts`, `.tsx` |
+| JavaScript | `.js`, `.jsx`, `.mjs`, `.cjs` |
+| Java | `.java` |
+| C# | `.cs` |
+
+### New `.env` options
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `CODE_GRAPH_ENABLED` | `false` | Enable tree-sitter indexing for code files. Requires `codegraph` extra. |
+| `CLEANUP_ORPHANS_ON_SCAN` | `false` | Delete symbols for files no longer on disk during scan. Enable only when scan covers all of `INPUT_DIR`. |
+| `RESOLVE_CROSS_FILE_ON_SCAN` | `false` | Rewrite short edge targets (`py:fn`) to full FQNs after each scan — makes "who calls X" queries navigable. O(N nodes); disable on very large repos if scans are slow. |
+
+Install with the `codegraph` extra:
+
+```bash
+uv sync --extra api --extra codegraph
+# or
+pip install "lightrag-hku[api,codegraph]"
+```
+
+### Claude Code plugin
+
+`plugin/` contains a Claude Code plugin (v0.2) that exposes the index via MCP
+tools and slash-skills — no separate tool installs needed.
+
+**Slash-skills:**
+
+| Skill | What it does |
+|---|---|
+| `/lightrag:query <question>` | Semantic + graph search |
+| `/lightrag:scan` | Trigger a re-index of `INPUT_DIR` |
+| `/lightrag:status` | Show document counts and pipeline progress |
+| `/lightrag:graph` | Structural graph walks (callers / implementers / importers / symbol) |
+| `/lightrag:install-git-hooks` | Drop git hooks so the index auto-updates on pull / commit / checkout |
+
+**Structural MCP tools** (exact, no LLM, <100ms):
+
+| Tool | Use when |
+|---|---|
+| `find_callers(fqn)` | "who calls `mod.fn`?" |
+| `find_implementers(fqn)` | "what implements `IFoo`?" |
+| `find_importers(fqn)` | "who imports `requests`?" |
+| `get_symbol(fqn)` | full node detail + all incident edges |
+
+FQN format: `py:pkg.mod.fn`, `ts:src.api.fn`, `java:com.corp.Cls`, `cs:Corp.Ns.Cls`.
+
+See [`plugin/README.md`](./plugin/README.md) for install and configuration details.
+
+### Quick start for code indexing
+
+```bash
+# 1. Install with codegraph support
+uv sync --extra api --extra codegraph
+
+# 2. Configure .env
+CODE_GRAPH_ENABLED=true
+CLEANUP_ORPHANS_ON_SCAN=true
+RESOLVE_CROSS_FILE_ON_SCAN=true
+INPUT_DIR=/path/to/your/repo
+
+# 3. Start the server
+lightrag-server &
+
+# 4. In Claude Code — install the plugin and index
+/lightrag:scan
+/lightrag:install-git-hooks   # auto-update on git pull/commit
+```
+
+---
+
 ## Installation
 
 **💡 Using uv for Package Management**: This project uses [uv](https://docs.astral.sh/uv/) for fast and reliable Python package management. Install uv first: `curl -LsSf https://astral.sh/uv/install.sh | sh` (Unix/macOS) or `powershell -c "irm https://astral.sh/uv/install.ps1 | iex"` (Windows)
