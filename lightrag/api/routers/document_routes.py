@@ -2022,6 +2022,25 @@ async def run_scanning_process(
         logger.info(f"Enqueuing complete: {total_valid} files. Starting LLM extraction.")
         await rag.apipeline_process_enqueue_documents()
 
+        # Cross-file resolution: rewrite unresolved codegraph edges (``py:foo``)
+        # to real fully-qualified targets (``py:pkg.mod.foo``) where a unique
+        # match exists. Gated by rag.resolve_cross_file_on_scan.
+        if rag.resolve_cross_file_on_scan:
+            await _set_status(
+                "Resolving cross-file codegraph edges...",
+                cur=total_valid, busy=True,
+            )
+            resolution = await rag.apipeline_resolve_cross_file_edges()
+            resolution_msg = (
+                f"Resolved {resolution['resolved']}/{resolution['scanned_edges']} "
+                f"cross-file edges "
+                f"({resolution['ambiguous']} ambiguous, "
+                f"{resolution['unresolvable']} unresolvable) "
+                f"across {resolution['real_nodes']} symbols"
+            )
+            logger.info(resolution_msg)
+            await _set_status(resolution_msg, cur=total_valid, busy=False)
+
         # Orphan cleanup: drop docs whose file_path is no longer present on
         # disk (or now excluded by gitignore / extension filters). Gated by
         # rag.cleanup_orphans_on_scan so partial scans don't wipe real docs.

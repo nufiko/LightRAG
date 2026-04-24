@@ -539,6 +539,16 @@ class LightRAG:
     default because a partial scan would otherwise remove legitimate docs.
     Only enable when the scan is trusted to walk the entire input_dir."""
 
+    resolve_cross_file_on_scan: bool = field(
+        default=os.getenv("RESOLVE_CROSS_FILE_ON_SCAN", "false").strip().lower()
+        in ("1", "true", "yes", "on")
+    )
+    """If True, run_scanning_process runs the cross-file resolution pass at the
+    end of each scan: walks the graph and rewrites unresolved edges like
+    ``py:foo`` to the fully-qualified ``py:pkg.mod.foo`` when a unique real
+    target exists in the workspace.  Off by default — the pass is O(N nodes)
+    and not every deployment needs it on every scan."""
+
     cosine_better_than_threshold: float = field(
         default=float(os.getenv("COSINE_THRESHOLD", 0.2))
     )
@@ -1844,6 +1854,16 @@ class LightRAG:
             "failed": failed,
             "codegraph_purged": codegraph_purged,
         }
+
+    async def apipeline_resolve_cross_file_edges(self) -> dict[str, int]:
+        """Walk the graph and rewrite unresolved codegraph edges to their
+        real fully-qualified targets.  Thin wrapper around
+        ``lightrag.codegraph.resolution.resolve_cross_file_edges`` so it
+        can be invoked from the scan pipeline or user code without
+        importing the submodule directly."""
+        from lightrag.codegraph.resolution import resolve_cross_file_edges
+
+        return await resolve_cross_file_edges(self)
 
     async def apipeline_process_enqueue_documents(
         self,
