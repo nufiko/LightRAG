@@ -685,4 +685,74 @@ def create_graph_routes(rag, api_key: Optional[str] = None):
                 status_code=500, detail=f"Error merging entities: {str(e)}"
             )
 
+    # ------------------------------------------------------------------
+    # Code-graph structural queries
+    # ------------------------------------------------------------------
+    # Thin HTTP shells over lightrag.codegraph.queries helpers. Each
+    # endpoint filters edges by the explicit ``src``/``dst`` properties
+    # that edge_to_storage emits — backend direction semantics don't
+    # matter.
+
+    @router.get("/graph/code/callers", dependencies=[Depends(combined_auth)])
+    async def code_callers(target: str = Query(..., min_length=1)):
+        """Return nodes with a ``calls`` edge pointing AT *target*."""
+        from lightrag.codegraph.queries import find_callers
+
+        try:
+            hits = await find_callers(rag.chunk_entity_relation_graph, target)
+            return {"target": target, "count": len(hits), "callers": hits}
+        except Exception as e:
+            logger.error(f"/graph/code/callers({target}): {e}")
+            logger.error(traceback.format_exc())
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @router.get("/graph/code/implementers", dependencies=[Depends(combined_auth)])
+    async def code_implementers(target: str = Query(..., min_length=1)):
+        """Return nodes with an ``inherits`` edge pointing AT *target*.
+
+        Covers both subclass relationships (``extends``) and interface
+        implementations (``implements``) — the extractor emits both as
+        ``inherits``.
+        """
+        from lightrag.codegraph.queries import find_implementers
+
+        try:
+            hits = await find_implementers(rag.chunk_entity_relation_graph, target)
+            return {"target": target, "count": len(hits), "implementers": hits}
+        except Exception as e:
+            logger.error(f"/graph/code/implementers({target}): {e}")
+            logger.error(traceback.format_exc())
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @router.get("/graph/code/importers", dependencies=[Depends(combined_auth)])
+    async def code_importers(target: str = Query(..., min_length=1)):
+        """Return nodes with an ``imports`` edge pointing AT *target*."""
+        from lightrag.codegraph.queries import find_importers
+
+        try:
+            hits = await find_importers(rag.chunk_entity_relation_graph, target)
+            return {"target": target, "count": len(hits), "importers": hits}
+        except Exception as e:
+            logger.error(f"/graph/code/importers({target}): {e}")
+            logger.error(traceback.format_exc())
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @router.get("/graph/code/symbol", dependencies=[Depends(combined_auth)])
+    async def code_symbol(fqn: str = Query(..., min_length=1)):
+        """Full detail for *fqn*: node attrs + split incident edges.
+
+        Returns 404 when no node exists with that id.
+        """
+        from lightrag.codegraph.queries import get_symbol
+
+        try:
+            detail = await get_symbol(rag.chunk_entity_relation_graph, fqn)
+        except Exception as e:
+            logger.error(f"/graph/code/symbol({fqn}): {e}")
+            logger.error(traceback.format_exc())
+            raise HTTPException(status_code=500, detail=str(e))
+        if detail is None:
+            raise HTTPException(status_code=404, detail=f"no symbol {fqn!r} in graph")
+        return detail
+
     return router
